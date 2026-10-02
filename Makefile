@@ -38,6 +38,6 @@ typecheck:
 	uv run mypy
 
 migrate:
-	docker compose exec api alembic upgrade head
+	docker compose run --rm migrate
 
 check: lint typecheck test

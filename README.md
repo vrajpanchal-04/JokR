@@ -30,7 +30,7 @@ make test-local              # pytest against the compose db on 127.0.0.1:5432
 | --- | --- |
 | `config/` | `caps.yaml` (C6 budgets), `fit_rules.yaml`, `scoring.yaml`, `sources.yaml` (C3 allowlist). Validated strictly at startup. |
 | `jokr/config.py` | Pydantic models for those files. A bad file stops the app. |
-| `jokr/db/` | SQLAlchemy models and Alembic migrations. `decisions_log` is append-only (C10): a Postgres trigger blocks UPDATE/DELETE/TRUNCATE, and the API runs as `jokr_app`, a role that owns nothing and so cannot disable the trigger. Migrations run as the owner (`MIGRATION_DATABASE_URL`). |
+| `jokr/db/` | SQLAlchemy models and Alembic migrations. `decisions_log` is append-only (C10): a Postgres trigger blocks UPDATE/DELETE/TRUNCATE, and the API runs as `jokr_app`, a role that owns nothing and so cannot disable the trigger. Migrations run as the owner (`MIGRATION_DATABASE_URL`) in the one-shot `migrate` service, so the API never holds owner credentials. |
 | `ops/db-init/` | Runs once on a fresh db volume: creates the `jokr_app` login role. |
 | `jokr/api/` | FastAPI app. `GET /health` checks the DB, pgvector and config. |
 | `jokr/agents/`, `connectors/`, `guards/`, `stats/`, `prompts/` | Empty until their phase (P1+). |

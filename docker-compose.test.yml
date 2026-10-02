@@ -10,6 +10,9 @@ services:
       - /var/lib/postgresql/data
     ports: !reset []
 
+  migrate:
+    profiles: ["never"]
+
   api:
     profiles: ["never"]
 

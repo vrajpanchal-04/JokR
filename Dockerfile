@@ -29,8 +29,9 @@ EXPOSE 8000
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
     CMD ["python", "-c", "import urllib.request,sys; sys.exit(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status != 200)"]
 
-# Migrations run on every start; they are idempotent from zero (A8).
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn jokr.api.main:app --host 0.0.0.0 --port 8000"]
+# Migrations run in compose's one-shot `migrate` service, so the API never
+# holds the owner credentials.
+CMD ["uvicorn", "jokr.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 
 # Test image: same code plus dev tools and the test suite. Used by `make test`.
