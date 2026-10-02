@@ -8,8 +8,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:?set in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
       POSTGRES_DB: ${POSTGRES_DB:?set in .env}
+      JOKR_APP_PASSWORD: ${JOKR_APP_PASSWORD:?set in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./ops/db-init:/docker-entrypoint-initdb.d:ro
     ports:
       - "127.0.0.1:5432:5432"   # localhost only; never expose the DB publicly
     healthcheck:
@@ -25,6 +27,7 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL:?set in .env}
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?set in .env}
       JOKR_CONFIG_DIR: /app/config
     depends_on:
       db:

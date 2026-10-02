@@ -1,4 +1,4 @@
-"""Init: pgvector extension and append-only decisions_log (C10).
+"""Init: pgvector extension, app role, and append-only decisions_log (C10).
 
 Revision ID: 0001
 Revises:
@@ -15,6 +15,12 @@ revision: str = "0001"
 down_revision: str | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+# The API connects as this role. It does not own any table, so it cannot
+# disable triggers, alter or drop tables, or switch off replication triggers.
+# The role is cluster-wide: created NOLOGIN here if missing; ops/db-init gives
+# it a password in the compose stack. Downgrade revokes but never drops it.
+APP_ROLE = "jokr_app"
 
 
 def upgrade() -> None:
@@ -36,8 +42,8 @@ def upgrade() -> None:
     )
     op.create_index("ix_decisions_log_ts", "decisions_log", ["ts"])
 
-    # C10 lives in the database, not the app, so no code path (or psql session
-    # as the app user) can rewrite history. Only a migration can drop this.
+    # C10 lives in the database, not the app. Together with the owner/app role
+    # split, no API code path can rewrite history; only a migration can.
     op.execute(
         """
         CREATE FUNCTION decisions_log_append_only() RETURNS trigger
@@ -64,8 +70,23 @@ def upgrade() -> None:
         """
     )
 
+    op.execute(
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{APP_ROLE}') THEN
+                CREATE ROLE {APP_ROLE} NOLOGIN;
+            END IF;
+        END
+        $$
+        """
+    )
+    op.execute(f"GRANT USAGE ON SCHEMA public TO {APP_ROLE}")
+    op.execute(f"GRANT SELECT, INSERT ON decisions_log TO {APP_ROLE}")
+
 
 def downgrade() -> None:
+    op.execute(f"REVOKE USAGE ON SCHEMA public FROM {APP_ROLE}")
     op.drop_table("decisions_log")  # drops its triggers too
     op.execute("DROP FUNCTION decisions_log_append_only()")
     op.execute("DROP EXTENSION IF EXISTS vector")

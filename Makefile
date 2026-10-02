@@ -1,6 +1,10 @@
 .PHONY: up down logs test test-local lint format typecheck migrate check
 
-COMPOSE_TEST = docker compose -p jokr-test -f docker-compose.yml -f docker-compose.test.yml
+# Throwaway credentials for the test project. Shell env beats .env, so `make test`
+# works on a fresh clone and never sees the dev passwords.
+TEST_ENV = POSTGRES_USER=jokr POSTGRES_PASSWORD=jokr-test POSTGRES_DB=jokr \
+	JOKR_APP_PASSWORD=jokr-app-test DATABASE_URL=unused MIGRATION_DATABASE_URL=unused
+COMPOSE_TEST = $(TEST_ENV) docker compose -p jokr-test -f docker-compose.yml -f docker-compose.test.yml
 
 up:
 	docker compose up -d --build --wait

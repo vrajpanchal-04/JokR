@@ -69,3 +69,33 @@ def test_migrations_round_trip_from_zero(engine: Engine, migration_config: Confi
 
     command.upgrade(migration_config, "head")
     assert "decisions_log" in inspect(engine).get_table_names()
+
+
+# The API connects as jokr_app, not as the table owner. These tests prove that
+# role can append to the log but cannot get around the trigger either.
+
+
+def test_app_role_can_insert_and_read(db: Connection) -> None:
+    db.execute(text("SET LOCAL ROLE jokr_app"))
+    row_id = _insert(db)
+    assert db.execute(select(DecisionLog.id).where(DecisionLog.id == row_id)).scalar_one()
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE decisions_log SET reason = 'rewritten'",
+        "DELETE FROM decisions_log",
+        "ALTER TABLE decisions_log DISABLE TRIGGER decisions_log_no_update_delete",
+        "DROP TABLE decisions_log",
+        "SET session_replication_role = replica",
+    ],
+    ids=["update", "delete", "disable-trigger", "drop", "replication-role"],
+)
+def test_app_role_cannot_bypass_append_only(db: Connection, statement: str) -> None:
+    db.execute(text("SET LOCAL ROLE jokr_app"))
+
+    savepoint = db.begin_nested()
+    with pytest.raises(DBAPIError, match=r"append-only|permission denied|must be owner"):
+        db.execute(text(statement))
+    savepoint.rollback()
