@@ -1,0 +1,25 @@
+# Test override: `make test` runs the suite in a separate compose project
+# with a throwaway, in-memory database. It never touches the dev volume.
+services:
+  db:
+    environment:
+      POSTGRES_USER: jokr
+      POSTGRES_PASSWORD: jokr-test
+      POSTGRES_DB: jokr
+    volumes: !reset []
+    tmpfs:
+      - /var/lib/postgresql/data
+    ports: !reset []
+
+  api:
+    profiles: ["never"]
+
+  test:
+    build:
+      context: .
+      target: test
+    environment:
+      TEST_DATABASE_URL: postgresql+psycopg://jokr:jokr-test@db:5432/postgres
+    depends_on:
+      db:
+        condition: service_healthy
