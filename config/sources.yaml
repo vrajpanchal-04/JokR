@@ -1,0 +1,22 @@
+# Source allowlist (C3, blueprint §4.2). Anything not listed here may not be read.
+# Everything is off until its connector ships (P1).
+sources:
+  - name: hackernews
+    type: api
+    tos_url: https://github.com/HackerNews/API
+    rate_limit_per_min: 60
+    enabled: false
+  - name: reddit
+    type: api
+    tos_url: https://redditinc.com/policies/data-api-terms
+    rate_limit_per_min: 60
+    enabled: false
+  - name: arxiv
+    type: api
+    tos_url: https://info.arxiv.org/help/api/tou.html
+    rate_limit_per_min: 20
+    enabled: false
+  - name: inbox
+    type: inbox
+    path: data/inbox
+    enabled: false
