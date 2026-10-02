@@ -1,0 +1,6 @@
+# C6 budget caps (blueprint §2). The app refuses to start if this file is invalid.
+per_experiment_cad: 50    # one demand test, all-in
+per_month_cad: 200        # all ads and tools in a calendar month
+llm_per_day_usd: 5        # Anthropic API spend per day
+llm_alert_ratio: 0.8      # alert Luca at 80% of the daily LLM cap
+max_live_bets: 5          # experiments running at once

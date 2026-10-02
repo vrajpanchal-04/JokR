@@ -1,0 +1,20 @@
+# Luca's fit rules (blueprint §1). Every idea must pass all of them (Scorer fit gate).
+rules:
+  - id: product_not_service
+    name: Product, not service
+    description: Compounds without Luca's hours.
+  - id: private
+    name: Private
+    description: No Luca face, no personal brand required.
+  - id: ai_buildable
+    name: AI-buildable
+    description: A digital product Claude Code can build and maintain.
+  - id: no_teaching
+    name: No teaching or tutoring
+    description: Never.
+  - id: low_capital
+    name: Low capital
+    description: First test costs at most $50 CAD.
+  - id: legal_and_clean
+    name: Legal and clean
+    description: No grey area, no deception, no spam.

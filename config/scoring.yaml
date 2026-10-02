@@ -1,0 +1,16 @@
+# Scorer weights (blueprint §4.4). Score = fit gate x weighted sum of 0-10 factors.
+# Weights must sum to 1.0.
+weights:
+  pain_intensity: 0.20
+  demand_signal: 0.15
+  willingness_to_pay: 0.15
+  build_cost_inverse: 0.15
+  distribution_ease: 0.15
+  competition_gap: 0.10
+  research_edge: 0.10
+
+# Gate G1 (blueprint §8): Luca may approve a test only at or above this score.
+g1_threshold: 6.5
+
+# A factor with low confidence and at least this weight flags the idea "needs evidence".
+needs_evidence_min_weight: 0.15
