@@ -339,3 +339,11 @@ async def test_scheme_relative_location_stays_on_the_same_host() -> None:
     async with _client() as client:
         await client.get(HN)
     assert same.called
+
+
+@respx.mock
+async def test_source_specific_user_agent_is_used() -> None:
+    route = respx.get(HN).respond(200)
+    async with _client(user_agent="linux:jokr-scout:0.1 (by /u/someone)") as client:
+        await client.get(HN)
+    assert route.calls.last.request.headers["user-agent"] == "linux:jokr-scout:0.1 (by /u/someone)"

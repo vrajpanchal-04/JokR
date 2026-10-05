@@ -109,6 +109,8 @@ class RedditParams(_Strict):
     ]
     listing: Literal["new", "top", "hot"] = "new"
     limit: Annotated[int, Field(ge=1, le=100)] = 100
+    lookback_days: Annotated[int, Field(ge=1, le=365)] = 7
+    max_pages_per_subreddit: Annotated[int, Field(ge=1, le=10)] = 3
 
 
 class ArxivParams(_Strict):

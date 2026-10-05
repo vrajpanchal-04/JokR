@@ -167,6 +167,7 @@ class GuardedClient:
         jitter: Callable[[], float] = lambda: random.uniform(0.5, 1.0),  # noqa: S311 - not crypto
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         timeout_s: float = DEFAULT_TIMEOUT_S,
+        user_agent: str | None = None,
     ) -> None:
         if not source.enabled:
             raise SourceDisabled(f"source {source.name!r} is disabled")
@@ -176,7 +177,8 @@ class GuardedClient:
         self.pacer = Pacer(source.min_interval_s, source.max_requests, clock=clock, sleep=sleep)
         self._jitter = jitter
         self._max_bytes = max_response_bytes
-        self._default_headers = {"User-Agent": _user_agent()}
+        # Some sources (Reddit) require their own UA format; otherwise we name ourselves.
+        self._default_headers = {"User-Agent": user_agent or _user_agent()}
         # Pinned CA bundle and no environment: proxies, netrc and SSL_CERT_FILE can't
         # change where we connect or whom we trust.
         tls = ssl.create_default_context(cafile=certifi.where())
