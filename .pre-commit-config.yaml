@@ -18,6 +18,15 @@ repos:
         args: [--fix]
       - id: ruff-format
 
+  # Claude Code hook scripts are excluded above with the rest of .claude/,
+  # but they are ours, so lint them explicitly.
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+        files: ^\.claude/hooks/.*\.sh$
+        exclude: ^$
+
   # §10: no secrets in git.
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1
