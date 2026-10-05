@@ -40,8 +40,15 @@ jobs:
           uv run ruff format --check .
       - name: Typecheck
         run: uv run mypy
-      - name: Tests
-        run: uv run pytest
+      - name: Tests (parallel, with coverage floor)
+        # Connector tests replay scrubbed fixtures; nothing here calls the internet.
+        run: uv run pytest -n auto --cov=jokr --cov-report=term-missing --cov-fail-under=80
+      - name: Dependency audit
+        run: |
+          uv export --frozen --no-dev --no-emit-project --format requirements-txt -o requirements.txt
+          uv run pip-audit -r requirements.txt --disable-pip
+      - name: Shellcheck hook and ops scripts
+        run: uv run pre-commit run shellcheck --all-files
       - name: Secret scan
         uses: gitleaks/gitleaks-action@v2
         env:
@@ -55,6 +62,8 @@ jobs:
       - run: cp .env.example .env
       - run: docker compose up -d --build --wait
       - run: curl -fsS localhost:8000/health
+      # Scout's wiring without the internet: its role logs in, sources are synced.
+      - run: docker compose --profile jobs run --rm scout jokr scout stats
       - if: failure()
         run: docker compose logs
       - run: docker compose down -v
