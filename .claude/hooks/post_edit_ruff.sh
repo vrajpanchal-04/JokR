@@ -8,9 +8,12 @@ case "$(realpath "$file")" in "$(realpath "$CLAUDE_PROJECT_DIR")"/*) ;; *) exit 
 cd "$CLAUDE_PROJECT_DIR" || exit 0
 # No venv yet (fresh clone): skip rather than block; `uv sync` first.
 [[ -d .venv ]] || { echo "no .venv; run uv sync to enable this hook" >&2; exit 0; }
-# Fix first, then format, so removed imports do not leave stray blank lines.
-out=$(uv run --no-sync --quiet ruff check --fix --force-exclude --quiet -- "$file" 2>&1); status=$?
+# Fix first, then format, so removed imports do not leave stray blank lines. Then
+# check once more: only what neither fix nor format could resolve is reported
+# (formatting wraps most long lines, so checking before it gave false alarms).
+uv run --no-sync --quiet ruff check --fix --force-exclude --quiet -- "$file" >/dev/null 2>&1
 uv run --no-sync --quiet ruff format --force-exclude --quiet -- "$file" >/dev/null 2>&1
+out=$(uv run --no-sync --quiet ruff check --force-exclude --quiet -- "$file" 2>&1); status=$?
 if [[ $status -ne 0 ]]; then
   printf 'ruff: unresolved issues in %s\n%s\n' "$file" "$out" >&2
   exit 2

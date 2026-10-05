@@ -141,6 +141,22 @@ def test_ruff_hook_fixes_edited_file() -> None:
 
 
 @needs_jq
+def test_ruff_hook_does_not_report_long_lines_the_formatter_wraps() -> None:
+    if not (ROOT / ".venv").is_dir():
+        pytest.skip("no .venv")
+    target = ROOT / "tests" / f"_hook_probe_long_{os.getpid()}.py"
+    args = ", ".join(f"arg_number_{i}" for i in range(12))
+    try:
+        target.write_text(f"def f({args}) -> None:\n    pass\n")
+        payload = {"tool_name": "Write", "tool_input": {"file_path": str(target)}}
+        result = _run([str(HOOKS / "post_edit_ruff.sh")], payload)
+        assert result.returncode == 0, result.stderr
+        assert max(len(line) for line in target.read_text().splitlines()) <= 100
+    finally:
+        target.unlink(missing_ok=True)
+
+
+@needs_jq
 def test_ruff_hook_reports_unfixable_issue() -> None:
     if not (ROOT / ".venv").is_dir():
         pytest.skip("no .venv")
