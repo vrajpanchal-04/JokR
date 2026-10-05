@@ -9,6 +9,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
       POSTGRES_DB: ${POSTGRES_DB:?set in .env}
       JOKR_APP_PASSWORD: ${JOKR_APP_PASSWORD:?set in .env}
+      JOKR_SCOUT_PASSWORD: ${JOKR_SCOUT_PASSWORD:?set in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./ops/db-init:/docker-entrypoint-initdb.d:ro

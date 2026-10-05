@@ -1,0 +1,232 @@
+"""Scout: sources mirror, insert-only signals, per-source runs, and the jokr_scout role.
+
+Revision ID: 0002
+Revises: 0001
+Create Date: 2026-10-05
+"""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects import postgresql
+
+revision: str = "0002"
+down_revision: str | None = "0001"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+APP_ROLE = "jokr_app"
+# Scout's own login. Like jokr_app it owns nothing, so it cannot alter tables
+# or grants. Created NOLOGIN here if ops/db-init has not already made it.
+SCOUT_ROLE = "jokr_scout"
+# The only run columns Scout may change after inserting the row.
+RUN_UPDATABLE = ("status", "finished_at", "n_fetched", "n_new", "n_skipped", "error", "rejections")
+
+HEX64 = "'^[0-9a-f]{64}$'"
+
+
+def _id() -> sa.Column[int]:
+    return sa.Column("id", sa.BigInteger, sa.Identity(always=True), primary_key=True)
+
+
+def _created_sources() -> None:
+    op.create_table(
+        "sources",
+        _id(),
+        sa.Column("name", sa.Text, nullable=False, unique=True),
+        sa.Column("type", sa.Text, nullable=False),
+        sa.Column("enabled", sa.Boolean, nullable=False),
+        sa.Column("tos_url", sa.Text),
+        sa.Column(
+            "allowed_hosts",
+            postgresql.ARRAY(sa.Text),
+            nullable=False,
+            server_default=sa.text("'{}'"),
+        ),
+        sa.Column("min_interval_s", sa.Float),
+        sa.Column("max_requests", sa.Integer),
+        sa.Column(
+            "synced_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.Column("retired_at", sa.DateTime(timezone=True)),
+        sa.CheckConstraint("name ~ '^[a-z][a-z0-9_]{0,62}$'", name="sources_name_format"),
+        sa.CheckConstraint("type IN ('api', 'inbox')", name="sources_type"),
+        sa.CheckConstraint(
+            "type <> 'api' OR (tos_url IS NOT NULL AND min_interval_s IS NOT NULL "
+            "AND max_requests IS NOT NULL AND cardinality(allowed_hosts) > 0)",
+            name="sources_api_needs_terms_and_limits",
+        ),
+        sa.CheckConstraint(
+            "type <> 'inbox' OR (tos_url IS NULL AND cardinality(allowed_hosts) = 0)",
+            name="sources_inbox_is_local",
+        ),
+        sa.CheckConstraint(
+            "min_interval_s IS NULL OR min_interval_s >= 0", name="sources_interval"
+        ),
+        sa.CheckConstraint("max_requests IS NULL OR max_requests > 0", name="sources_max_requests"),
+    )
+
+
+def _created_runs() -> None:
+    op.create_table(
+        "runs",
+        _id(),
+        sa.Column("agent", sa.Text, nullable=False),
+        sa.Column(
+            "source_id",
+            sa.BigInteger,
+            sa.ForeignKey("sources.id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
+        sa.Column("status", sa.Text, nullable=False, server_default=sa.text("'running'")),
+        sa.Column(
+            "started_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.Column("finished_at", sa.DateTime(timezone=True)),
+        sa.Column("n_fetched", sa.Integer, nullable=False, server_default=sa.text("0")),
+        sa.Column("n_new", sa.Integer, nullable=False, server_default=sa.text("0")),
+        sa.Column("n_skipped", sa.Integer, nullable=False, server_default=sa.text("0")),
+        sa.Column("tokens", sa.Integer, nullable=False, server_default=sa.text("0")),
+        sa.Column("cost", sa.Numeric(12, 6), nullable=False, server_default=sa.text("0")),
+        sa.Column("error", sa.Text),
+        sa.Column(
+            "rejections",
+            postgresql.JSONB,
+            nullable=False,
+            server_default=sa.text("'[]'::jsonb"),
+        ),
+        sa.CheckConstraint("status IN ('running', 'ok', 'partial', 'failed')", name="runs_status"),
+        # A run is finished exactly when it has left 'running'.
+        sa.CheckConstraint(
+            "(status = 'running') = (finished_at IS NULL)", name="runs_finished_matches_status"
+        ),
+        sa.CheckConstraint(
+            "finished_at IS NULL OR finished_at >= started_at", name="runs_time_order"
+        ),
+        sa.CheckConstraint(
+            "n_fetched >= 0 AND n_new >= 0 AND n_skipped >= 0 AND tokens >= 0 AND cost >= 0",
+            name="runs_counts_non_negative",
+        ),
+        sa.CheckConstraint("char_length(error) <= 4000", name="runs_error_size"),
+        sa.CheckConstraint(
+            "jsonb_typeof(rejections) = 'array' AND jsonb_array_length(rejections) <= 100",
+            name="runs_rejections_shape",
+        ),
+    )
+    op.create_index("ix_runs_agent_started", "runs", ["agent", sa.text("started_at DESC")])
+
+
+def _created_signals() -> None:
+    op.create_table(
+        "signals",
+        _id(),
+        sa.Column(
+            "source_id",
+            sa.BigInteger,
+            sa.ForeignKey("sources.id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
+        sa.Column(
+            "run_id", sa.BigInteger, sa.ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False
+        ),
+        sa.Column("external_id", sa.Text, nullable=False),
+        sa.Column("url", sa.Text),
+        sa.Column("url_canonical", sa.Text),
+        sa.Column("locator", sa.Text),
+        sa.Column("title", sa.Text),
+        sa.Column("text", sa.Text, nullable=False),
+        sa.Column("author_hash", sa.Text),
+        sa.Column("points", sa.Integer),
+        sa.Column("num_comments", sa.Integer),
+        sa.Column("posted_at", sa.DateTime(timezone=True)),
+        sa.Column(
+            "fetched_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.Column("content_hash", sa.Text, nullable=False),
+        sa.Column("trust", sa.Text, nullable=False, server_default=sa.text("'untrusted'")),
+        sa.Column(
+            "flags", postgresql.ARRAY(sa.Text), nullable=False, server_default=sa.text("'{}'")
+        ),
+        sa.Column("raw", postgresql.JSONB, nullable=False),
+        sa.Column("intent_score", sa.Numeric(6, 3), nullable=False),
+        sa.Column("intent_terms", postgresql.ARRAY(sa.Text), nullable=False),
+        sa.Column("intent_version", sa.Text, nullable=False),
+        sa.UniqueConstraint("source_id", "external_id", name="signals_source_external_id"),
+        sa.CheckConstraint(
+            "char_length(external_id) BETWEEN 1 AND 512", name="signals_external_id_size"
+        ),
+        sa.CheckConstraint("url IS NOT NULL OR locator IS NOT NULL", name="signals_has_origin"),
+        sa.CheckConstraint("char_length(url) <= 2048", name="signals_url_size"),
+        sa.CheckConstraint("char_length(url_canonical) <= 2048", name="signals_url_canonical_size"),
+        sa.CheckConstraint("char_length(locator) <= 1024", name="signals_locator_size"),
+        sa.CheckConstraint("char_length(title) <= 1024", name="signals_title_size"),
+        sa.CheckConstraint("octet_length(text) <= 32768", name="signals_text_size"),
+        sa.CheckConstraint(f"author_hash ~ {HEX64}", name="signals_author_hash_format"),
+        sa.CheckConstraint(f"content_hash ~ {HEX64}", name="signals_content_hash_format"),
+        sa.CheckConstraint(
+            "(points IS NULL OR points >= 0) AND (num_comments IS NULL OR num_comments >= 0)",
+            name="signals_engagement_non_negative",
+        ),
+        sa.CheckConstraint("trust IN ('untrusted')", name="signals_trust"),
+        sa.CheckConstraint(
+            "jsonb_typeof(raw) = 'object' AND pg_column_size(raw) < 1048576",
+            name="signals_raw_shape",
+        ),
+        sa.CheckConstraint("intent_score >= 0", name="signals_intent_score_non_negative"),
+        sa.CheckConstraint("char_length(intent_version) >= 1", name="signals_intent_version"),
+    )
+    op.create_index("ix_signals_source_posted", "signals", ["source_id", sa.text("posted_at DESC")])
+    op.create_index(
+        "ix_signals_source_engagement",
+        "signals",
+        [
+            "source_id",
+            sa.text("points DESC NULLS LAST"),
+            sa.text("num_comments DESC NULLS LAST"),
+        ],
+    )
+    op.create_index("ix_signals_intent", "signals", [sa.text("intent_score DESC")])
+    op.create_index("ix_signals_fetched_at", "signals", ["fetched_at"])
+    op.create_index("ix_signals_content_hash", "signals", ["content_hash", "posted_at"])
+    op.create_index("ix_signals_url_canonical", "signals", ["url_canonical", "posted_at"])
+    op.create_index("ix_signals_run_id", "signals", ["run_id"])
+
+
+def _granted() -> None:
+    op.execute(
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{SCOUT_ROLE}') THEN
+                CREATE ROLE {SCOUT_ROLE} NOLOGIN;
+            END IF;
+        END
+        $$
+        """
+    )
+    op.execute(f"GRANT USAGE ON SCHEMA public TO {SCOUT_ROLE}")
+    op.execute(f"GRANT SELECT ON sources TO {SCOUT_ROLE}")
+    op.execute(f"GRANT SELECT, INSERT ON signals TO {SCOUT_ROLE}")
+    # SELECT lets Scout read back its own run id and filter UPDATE ... WHERE id = :id.
+    op.execute(f"GRANT SELECT, INSERT ON runs TO {SCOUT_ROLE}")
+    op.execute(f"GRANT UPDATE ({', '.join(RUN_UPDATABLE)}) ON runs TO {SCOUT_ROLE}")
+    # Scout appends to the log (C10) and may read back only the id it just wrote.
+    op.execute(f"GRANT INSERT, SELECT (id) ON decisions_log TO {SCOUT_ROLE}")
+    op.execute(f"GRANT SELECT ON sources, signals, runs TO {APP_ROLE}")
+
+
+def upgrade() -> None:
+    _created_sources()
+    _created_runs()
+    _created_signals()
+    _granted()
+
+
+def downgrade() -> None:
+    op.execute(f"REVOKE ALL ON sources, signals, runs FROM {APP_ROLE}, {SCOUT_ROLE}")
+    op.execute(f"REVOKE ALL ON decisions_log FROM {SCOUT_ROLE}")
+    op.execute(f"REVOKE USAGE ON SCHEMA public FROM {SCOUT_ROLE}")
+    op.drop_table("signals")
+    op.drop_table("runs")
+    op.drop_table("sources")

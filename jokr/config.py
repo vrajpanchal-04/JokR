@@ -131,7 +131,7 @@ SourceParams = Annotated[
 
 
 class Source(_Strict):
-    name: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*$")]
+    name: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*$", max_length=63)]
     type: Literal["api", "inbox"]
     enabled: bool
     params: SourceParams
