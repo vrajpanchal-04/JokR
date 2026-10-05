@@ -484,6 +484,7 @@ version = "0.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
+    { name = "certifi" },
     { name = "defusedxml" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -516,6 +517,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
+    { name = "certifi", specifier = ">=2026.7.22" },
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.28" },

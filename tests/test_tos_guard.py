@@ -5,6 +5,8 @@ every redirect hop. Nothing here touches the network: respx stands in for the
 internet and a stub resolver stands in for DNS.
 """
 
+from collections.abc import AsyncIterator
+
 import httpx
 import pytest
 import respx
@@ -12,11 +14,14 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from jokr.guards.tos import (
+    MAX_ATTEMPTS,
     GuardedClient,
+    GuardError,
     HostNotAllowed,
     ResponseTooLarge,
     SourceDisabled,
     TooManyRedirects,
+    UpstreamUnavailable,
     check_url,
 )
 from tests.guard_helpers import api_source, no_sleep, public_resolver
@@ -171,3 +176,166 @@ def test_check_url_property_only_exact_host_passes(host: str) -> None:
         return
     with pytest.raises(HostNotAllowed):
         check_url(httpx.URL(f"https://{host}/x"), allowed)
+
+
+# --- Hardening from the security review --------------------------------------
+
+WWW = "https://www.reddit.com/api/v1/access_token"
+OAUTH = "https://oauth.reddit.com/r/SaaS/new"
+
+
+def _reddit(**kwargs: object) -> GuardedClient:
+    source = api_source("reddit", ("www.reddit.com", "oauth.reddit.com"))
+    return GuardedClient(source, resolver=public_resolver, sleep=no_sleep, **kwargs)  # type: ignore[arg-type]
+
+
+@respx.mock
+async def test_cross_host_redirect_drops_credentials_cookies_and_keys() -> None:
+    respx.get(WWW).respond(302, headers={"Location": OAUTH})
+    target = respx.get(OAUTH).respond(200)
+    async with _reddit() as client:
+        await client.get(
+            WWW,
+            headers={"Authorization": "Bearer abc", "Cookie": "s=1", "X-API-Key": "k"},
+        )
+    sent = target.calls.last.request.headers
+    for name in ("authorization", "cookie", "x-api-key"):
+        assert name not in sent
+    assert sent["user-agent"].startswith("JokR-Scout/")
+
+
+@respx.mock
+async def test_same_host_redirect_keeps_headers() -> None:
+    respx.get(HN).respond(302, headers={"Location": "/api/v1/search_by_date"})
+    target = respx.get("https://hn.algolia.com/api/v1/search_by_date").respond(200)
+    async with _client() as client:
+        await client.get(HN, headers={"X-Algolia-Agent": "jokr"})
+    assert target.calls.last.request.headers["x-algolia-agent"] == "jokr"
+
+
+@respx.mock
+async def test_303_turns_post_into_bodyless_get() -> None:
+    respx.post(WWW).respond(303, headers={"Location": "/done"})
+    done = respx.get("https://www.reddit.com/done").respond(200)
+    async with _reddit() as client:
+        await client.post(WWW, data={"grant_type": "client_credentials"})
+    sent = done.calls.last.request
+    assert sent.method == "GET"
+    assert sent.content == b""
+    assert "content-type" not in sent.headers
+
+
+@respx.mock
+async def test_307_will_not_resend_a_body_to_another_host() -> None:
+    respx.post(WWW).respond(307, headers={"Location": OAUTH})
+    other = respx.post(OAUTH).respond(200)
+    async with _reddit() as client:
+        with pytest.raises(HostNotAllowed, match="body"):
+            await client.post(WWW, data={"grant_type": "client_credentials"})
+    assert not other.called
+
+
+@respx.mock
+async def test_307_on_the_same_host_keeps_method_and_body() -> None:
+    respx.post(WWW).respond(307, headers={"Location": "/api/v1/token2"})
+    again = respx.post("https://www.reddit.com/api/v1/token2").respond(200)
+    async with _reddit() as client:
+        await client.post(WWW, content=b"grant_type=client_credentials")
+    assert again.calls.last.request.content == b"grant_type=client_credentials"
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "//evil.example.com/x",  # protocol-relative
+        "https://2130706433/x",  # decimal 127.0.0.1
+        "https://0x7f.1/x",
+        "https://hn.algolia.com@evil.example.com/x",
+    ],
+)
+async def test_tricky_redirect_targets_are_refused(location: str) -> None:
+    with respx.mock(assert_all_called=False) as router:
+        router.get(HN).respond(302, headers={"Location": location})
+        other = router.route(host__regex=r"^(?!hn\.algolia\.com$).*").respond(200)
+        async with _client() as client:
+            with pytest.raises(HostNotAllowed):
+                await client.get(HN)
+        assert not other.called
+
+
+@respx.mock
+async def test_malformed_location_is_a_guard_error() -> None:
+    respx.get(HN).respond(302, headers={"Location": "https://[::1/x"})
+    async with _client() as client:
+        with pytest.raises(HostNotAllowed):
+            await client.get(HN)
+
+
+async def test_malformed_url_is_a_guard_error() -> None:
+    async with _client() as client:
+        with pytest.raises(HostNotAllowed):
+            await client.get("https://[::1/x")
+
+
+@respx.mock
+async def test_dns_is_checked_again_on_every_redirect_hop() -> None:
+    answers = {"www.reddit.com": ["151.101.1.1"], "oauth.reddit.com": ["10.0.0.9"]}
+
+    async def per_host(host: str) -> list[str]:
+        return answers[host]
+
+    respx.get(WWW).respond(302, headers={"Location": OAUTH})
+    target = respx.get(OAUTH).respond(200)
+    source = api_source("reddit", ("www.reddit.com", "oauth.reddit.com"))
+    async with GuardedClient(source, resolver=per_host, sleep=no_sleep) as client:
+        with pytest.raises(HostNotAllowed, match="private"):
+            await client.get(WWW)
+    assert not target.called
+
+
+async def test_empty_dns_answer_is_refused() -> None:
+    async def nothing(host: str) -> list[str]:
+        return []
+
+    async with GuardedClient(api_source(), resolver=nothing, sleep=no_sleep) as client:
+        with pytest.raises(HostNotAllowed, match="resolve"):
+            await client.get(HN)
+
+
+async def test_dns_failure_is_retried_then_reported_as_unavailable() -> None:
+    calls = 0
+
+    async def failing(host: str) -> list[str]:
+        nonlocal calls
+        calls += 1
+        raise OSError("Name or service not known")
+
+    async with GuardedClient(api_source(), resolver=failing, sleep=no_sleep) as client:
+        with pytest.raises(UpstreamUnavailable, match="DNS"):
+            await client.get(HN)
+    assert calls == MAX_ATTEMPTS
+
+
+async def test_streamed_request_bodies_are_refused() -> None:
+    async def body() -> AsyncIterator[bytes]:
+        yield b"x"
+
+    async with _client() as client:
+        with pytest.raises(GuardError, match="streamed"):
+            await client.post(HN, content=body())
+
+
+def test_client_ignores_proxy_and_netrc_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://attacker.example:8080")
+    client = _client()
+    assert client._client.trust_env is False
+
+
+@respx.mock
+async def test_scheme_relative_location_stays_on_the_same_host() -> None:
+    """RFC 3986 reads "https:evil.example.com/x" as a path on the current host."""
+    respx.get(HN).respond(302, headers={"Location": "https:evil.example.com/x"})
+    same = respx.get("https://hn.algolia.com/api/v1/evil.example.com/x").respond(200)
+    async with _client() as client:
+        await client.get(HN)
+    assert same.called

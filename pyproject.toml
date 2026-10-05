@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic>=1.13",
+    "certifi>=2026.7.22",
     "defusedxml>=0.7.1",
     "fastapi>=0.115",
     "httpx>=0.28",
