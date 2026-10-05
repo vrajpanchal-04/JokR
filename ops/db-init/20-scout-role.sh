@@ -9,5 +9,10 @@
 set -eu
 psql -v ON_ERROR_STOP=1 -v scout_password="$JOKR_SCOUT_PASSWORD" \
     --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<'SQL'
-CREATE ROLE jokr_scout LOGIN PASSWORD :'scout_password';
+-- Idempotent, so a re-run (or a role made earlier by migration 0002) is fine.
+SELECT format('CREATE ROLE jokr_scout NOLOGIN')
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'jokr_scout') \gexec
+ALTER ROLE jokr_scout LOGIN PASSWORD :'scout_password' CONNECTION LIMIT 5;
+-- A runaway query from a batch job should fail, not hold locks for hours.
+ALTER ROLE jokr_scout SET statement_timeout = '60s';
 SQL

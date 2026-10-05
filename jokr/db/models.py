@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Identity,
     Index,
     Integer,
@@ -69,7 +70,11 @@ class Run(Base):
     """One row per source per Scout invocation."""
 
     __tablename__ = "runs"
-    __table_args__ = (Index("ix_runs_agent_started", "agent", text("started_at DESC")),)
+    __table_args__ = (
+        UniqueConstraint("id", "source_id", name="runs_id_source"),
+        Index("ix_runs_agent_started", "agent", text("started_at DESC")),
+        Index("ix_runs_source_started", "source_id", text("started_at DESC")),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
     agent: Mapped[str] = mapped_column(Text)
@@ -93,18 +98,39 @@ class Signal(Base):
 
     __tablename__ = "signals"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["run_id", "source_id"],
+            ["runs.id", "runs.source_id"],
+            name="signals_run_same_source",
+            ondelete="RESTRICT",
+        ),
         UniqueConstraint("source_id", "external_id", name="signals_source_external_id"),
-        Index("ix_signals_source_posted", "source_id", text("posted_at DESC")),
+        Index("ix_signals_source_posted", "source_id", text("posted_at DESC NULLS LAST")),
         Index(
             "ix_signals_source_engagement",
             "source_id",
             text("points DESC NULLS LAST"),
             text("num_comments DESC NULLS LAST"),
         ),
-        Index("ix_signals_intent", text("intent_score DESC")),
+        Index(
+            "ix_signals_rank",
+            text("intent_score DESC"),
+            text("points DESC NULLS LAST"),
+            text("num_comments DESC NULLS LAST"),
+            "id",
+        ),
         Index("ix_signals_fetched_at", "fetched_at"),
-        Index("ix_signals_content_hash", "content_hash", "posted_at"),
-        Index("ix_signals_url_canonical", "url_canonical", "posted_at"),
+        Index(
+            "ix_signals_content_hash",
+            "content_hash",
+            postgresql_include=["source_id", "posted_at", "fetched_at"],
+        ),
+        Index(
+            "ix_signals_url_canonical",
+            "url_canonical",
+            postgresql_include=["source_id", "posted_at", "fetched_at"],
+            postgresql_where=text("url_canonical IS NOT NULL"),
+        ),
         Index("ix_signals_run_id", "run_id"),
     )
 
@@ -112,7 +138,7 @@ class Signal(Base):
     source_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("sources.id", ondelete="RESTRICT")
     )
-    run_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("runs.id", ondelete="RESTRICT"))
+    run_id: Mapped[int] = mapped_column(BigInteger)
     external_id: Mapped[str] = mapped_column(Text)
     url: Mapped[str | None] = mapped_column(Text)
     url_canonical: Mapped[str | None] = mapped_column(Text)

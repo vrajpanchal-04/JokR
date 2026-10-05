@@ -90,18 +90,22 @@ def ids(db: Connection) -> Iterator[tuple[int, int]]:
     yield source_id, _run(db, source_id)
 
 
-def _fails(db: Connection, sql: str, params: dict[str, Any] | None = None) -> None:
-    savepoint = db.begin_nested()
-    with pytest.raises(DBAPIError):
-        db.execute(text(sql), params or {})
-    savepoint.rollback()
+# SQLSTATEs, so a typo in a test statement can't pass as a refusal.
+DENIED = "42501"  # insufficient_privilege (grants, ownership, our triggers)
+CHECK = "23514"  # check_violation
+FK = "23503"  # foreign_key_violation
 
 
-def _fails_insert(db: Connection, params: dict[str, Any]) -> None:
+def _fails(db: Connection, sql: Any, params: dict[str, Any] | None = None, *, code: str) -> None:
     savepoint = db.begin_nested()
-    with pytest.raises(DBAPIError):
-        db.execute(INSERT_SIGNAL, params)
+    with pytest.raises(DBAPIError) as info:
+        db.execute(text(sql) if isinstance(sql, str) else sql, params or {})
     savepoint.rollback()
+    assert getattr(info.value.orig, "sqlstate", None) == code, info.value
+
+
+def _fails_insert(db: Connection, params: dict[str, Any], *, code: str = CHECK) -> None:
+    _fails(db, INSERT_SIGNAL, params, code=code)
 
 
 # --- schema -------------------------------------------------------------------
@@ -153,6 +157,7 @@ def test_signal_defaults(db: Connection, ids: tuple[int, int]) -> None:
         {"url": "https://x/" + "a" * 2048},
         {"url": None, "locator": None},
         {"intent_score": -1},
+        {"intent_score": "NaN"},
         {"intent_version": ""},
         {"raw": '"just a string"'},
     ],
@@ -165,6 +170,7 @@ def test_signal_defaults(db: Connection, ids: tuple[int, int]) -> None:
         "url-over-2048",
         "no-url-or-locator",
         "negative-intent",
+        "nan-intent",
         "empty-intent-version",
         "raw-not-object",
     ],
@@ -179,6 +185,7 @@ def test_api_source_needs_tos_and_limits(db: Connection) -> None:
     _fails(
         db,
         "INSERT INTO sources (name, type, enabled) VALUES ('hn2', 'api', true)",
+        code=CHECK,
     )
 
 
@@ -188,12 +195,13 @@ def test_source_name_is_checked(db: Connection, name: str) -> None:
         db,
         "INSERT INTO sources (name, type, enabled) VALUES (:n, 'inbox', true)",
         {"n": name},
+        code=CHECK,
     )
 
 
 def test_source_with_signals_cannot_be_deleted(db: Connection, ids: tuple[int, int]) -> None:
     db.execute(INSERT_SIGNAL, _signal_params(*ids))
-    _fails(db, "DELETE FROM sources WHERE id = :id", {"id": ids[0]})
+    _fails(db, "DELETE FROM sources WHERE id = :id", {"id": ids[0]}, code=FK)
 
 
 @pytest.mark.parametrize(
@@ -205,11 +213,19 @@ def test_source_with_signals_cannot_be_deleted(db: Connection, ids: tuple[int, i
         "UPDATE runs SET status = 'ok' WHERE id = :id",  # finished runs need finished_at
         "UPDATE runs SET n_new = -1 WHERE id = :id",
         "UPDATE runs SET rejections = '{}'::jsonb WHERE id = :id",
+        "UPDATE runs SET cost = 'NaN' WHERE id = :id",
     ],
-    ids=["bad-status", "finish-before-start", "ok-without-finish", "negative-count", "rej-obj"],
+    ids=[
+        "bad-status",
+        "finish-before-start",
+        "ok-without-finish",
+        "negative-count",
+        "rej-obj",
+        "nan-cost",
+    ],
 )
 def test_run_constraints(db: Connection, ids: tuple[int, int], sql: str) -> None:
-    _fails(db, sql, {"id": ids[1]})
+    _fails(db, sql, {"id": ids[1]}, code=CHECK)
 
 
 def test_run_can_finish(db: Connection, ids: tuple[int, int]) -> None:
@@ -262,12 +278,19 @@ def test_scout_role_can_do_its_job(db: Connection) -> None:
         "UPDATE decisions_log SET reason = 'x'",
         "SELECT reason FROM decisions_log",
         "ALTER TABLE signals DROP CONSTRAINT IF EXISTS signals_text_size",
+        "UPDATE runs SET source_id = source_id",
+        "UPDATE runs SET tokens = 1",
+        "UPDATE runs SET cost = 1",
+        "INSERT INTO runs (agent, source_id, status, finished_at) "
+        "SELECT 'scout', id, 'ok', now() FROM sources LIMIT 1",
+        "INSERT INTO runs (agent, source_id, n_new) SELECT 'scout', id, 99 FROM sources LIMIT 1",
+        "CREATE TABLE rogue (x int)",
     ],
 )
 def test_scout_role_limits(db: Connection, ids: tuple[int, int], sql: str) -> None:
     db.execute(INSERT_SIGNAL, _signal_params(*ids))
     db.execute(text("SET LOCAL ROLE jokr_scout"))
-    _fails(db, sql)
+    _fails(db, sql, code=DENIED)
 
 
 def test_app_role_reads_scout_tables(db: Connection, ids: tuple[int, int]) -> None:
@@ -284,13 +307,130 @@ def test_app_role_reads_scout_tables(db: Connection, ids: tuple[int, int]) -> No
         "UPDATE runs SET status = 'failed'",
         "DELETE FROM signals",
         "UPDATE sources SET enabled = false",
+        "UPDATE signals SET text = 'x'",
+        "TRUNCATE signals",
+        "INSERT INTO sources (name, type, enabled) VALUES ('rogue', 'inbox', true)",
+        "UPDATE decisions_log SET reason = 'x'",
+        "CREATE TABLE rogue (x int)",
     ],
 )
 def test_app_role_cannot_write_scout_tables(db: Connection, ids: tuple[int, int], sql: str) -> None:
     db.execute(text("SET LOCAL ROLE jokr_app"))
-    _fails(db, sql)
+    _fails(db, sql, code=DENIED)
 
 
 def test_app_role_cannot_insert_signals(db: Connection, ids: tuple[int, int]) -> None:
     db.execute(text("SET LOCAL ROLE jokr_app"))
-    _fails_insert(db, _signal_params(*ids))
+    _fails_insert(db, _signal_params(*ids), code=DENIED)
+
+
+def test_scout_conflict_path_returns_nothing(db: Connection, ids: tuple[int, int]) -> None:
+    db.execute(text("SET LOCAL ROLE jokr_scout"))
+    assert db.execute(INSERT_SIGNAL, _signal_params(*ids)).scalar_one()
+    assert db.execute(INSERT_SIGNAL, _signal_params(*ids)).scalar_one_or_none() is None
+
+
+def test_signal_must_belong_to_a_run_of_its_own_source(db: Connection) -> None:
+    hn = _source(db, "hackernews")
+    inbox = _source(db, "inbox", kind="inbox")
+    inbox_run = _run(db, inbox)
+    _fails_insert(db, _signal_params(hn, inbox_run), code=FK)
+
+
+def test_finished_run_cannot_be_reopened_or_rewritten(db: Connection, ids: tuple[int, int]) -> None:
+    run_id = ids[1]
+    db.execute(
+        text("UPDATE runs SET status = 'ok', finished_at = now() WHERE id = :id"), {"id": run_id}
+    )
+    db.execute(text("SET LOCAL ROLE jokr_scout"))
+    for sql in (
+        "UPDATE runs SET status = 'running', finished_at = NULL WHERE id = :id",
+        "UPDATE runs SET n_new = 999 WHERE id = :id",
+    ):
+        _fails(db, sql, {"id": run_id}, code=DENIED)
+
+
+def test_owner_cannot_edit_signals_either(db: Connection, ids: tuple[int, int]) -> None:
+    """Defense in depth: the insert-only trigger holds even for the table owner."""
+    db.execute(INSERT_SIGNAL, _signal_params(*ids))
+    for sql in ("UPDATE signals SET text = 'x'", "DELETE FROM signals", "TRUNCATE signals"):
+        _fails(db, sql, code=DENIED)
+
+
+def test_new_run_takes_its_defaults(db: Connection) -> None:
+    source_id = _source(db)
+    db.execute(text("SET LOCAL ROLE jokr_scout"))
+    row = db.execute(
+        text("SELECT status, finished_at, n_new FROM runs WHERE id = :id"),
+        {"id": _run(db, source_id)},
+    ).one()
+    assert (row.status, row.finished_at, row.n_new) == ("running", None, 0)
+
+
+@pytest.mark.parametrize("role", ["jokr_scout", "jokr_app"])
+def test_roles_cannot_create_in_public(db: Connection, role: str) -> None:
+    can = db.execute(
+        text("SELECT has_schema_privilege(:r, 'public', 'CREATE')"), {"r": role}
+    ).scalar_one()
+    assert can is False
+
+
+def test_downgrade_refuses_while_signals_has_rows(
+    database_url: str, migration_config: Config, engine: Engine
+) -> None:
+    with engine.begin() as conn:
+        source_id = _source(conn, "downgrade_probe")
+        conn.execute(INSERT_SIGNAL, _signal_params(source_id, _run(conn, source_id)))
+    try:
+        with pytest.raises(DBAPIError, match="refusing to downgrade"):
+            command.downgrade(migration_config, "0001")
+    finally:
+        # The insert-only trigger blocks DELETE, so clean up the way an operator would.
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE signals DISABLE TRIGGER signals_no_update_delete"))
+            conn.execute(text("DELETE FROM signals WHERE source_id = :s"), {"s": source_id})
+            conn.execute(text("ALTER TABLE signals ENABLE TRIGGER signals_no_update_delete"))
+            conn.execute(text("DELETE FROM runs WHERE source_id = :s"), {"s": source_id})
+            conn.execute(text("DELETE FROM sources WHERE id = :s"), {"s": source_id})
+    assert "signals" in inspect(engine).get_table_names()
+
+
+def test_downgrade_revokes_scout_grants(engine: Engine, migration_config: Config) -> None:
+    command.downgrade(migration_config, "0001")
+    try:
+        with engine.connect() as conn:
+            can = conn.execute(
+                text("SELECT has_table_privilege('jokr_scout', 'decisions_log', 'INSERT')")
+            ).scalar_one()
+        assert can is False
+    finally:
+        command.upgrade(migration_config, "head")
+
+
+@pytest.mark.parametrize(
+    ("query", "index"),
+    [
+        (
+            "SELECT id FROM signals ORDER BY intent_score DESC, points DESC NULLS LAST, "
+            "num_comments DESC NULLS LAST, id LIMIT 20",
+            "ix_signals_rank",
+        ),
+        (
+            # The form Scout uses for its watermark.
+            "SELECT posted_at FROM signals WHERE source_id = 1 "
+            "ORDER BY posted_at DESC NULLS LAST LIMIT 1",
+            "ix_signals_source_posted",
+        ),
+        (
+            "SELECT content_hash, count(DISTINCT source_id) FROM signals "
+            "GROUP BY content_hash ORDER BY content_hash",
+            "ix_signals_content_hash",
+        ),
+    ],
+    ids=["top-n", "watermark", "recurring-pain"],
+)
+def test_planned_queries_can_use_their_index(db: Connection, query: str, index: str) -> None:
+    db.execute(text("SET LOCAL enable_seqscan = off"))
+    db.execute(text("SET LOCAL enable_sort = off"))
+    plan = "\n".join(db.execute(text(f"EXPLAIN {query}")).scalars())
+    assert index in plan, plan

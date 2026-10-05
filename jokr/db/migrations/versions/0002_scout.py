@@ -6,6 +6,7 @@ Create Date: 2026-10-05
 """
 
 from collections.abc import Sequence
+from datetime import datetime
 
 import sqlalchemy as sa
 from alembic import op
@@ -20,14 +21,42 @@ APP_ROLE = "jokr_app"
 # Scout's own login. Like jokr_app it owns nothing, so it cannot alter tables
 # or grants. Created NOLOGIN here if ops/db-init has not already made it.
 SCOUT_ROLE = "jokr_scout"
-# The only run columns Scout may change after inserting the row.
+# Column grants: a new run takes every other value from its defaults (status
+# 'running', zero counts, started_at now()), so Scout cannot backdate or pre-fill one.
+RUN_INSERTABLE = ("agent", "source_id")
+# The only run columns Scout may change, and only while the run is still running.
 RUN_UPDATABLE = ("status", "finished_at", "n_fetched", "n_new", "n_skipped", "error", "rejections")
+# Everything except id, fetched_at and trust, which always come from the defaults.
+SIGNAL_INSERTABLE = (
+    "source_id",
+    "run_id",
+    "external_id",
+    "url",
+    "url_canonical",
+    "locator",
+    "title",
+    "text",
+    "author_hash",
+    "points",
+    "num_comments",
+    "posted_at",
+    "content_hash",
+    "flags",
+    "raw",
+    "intent_score",
+    "intent_terms",
+    "intent_version",
+)
 
 HEX64 = "'^[0-9a-f]{64}$'"
 
 
 def _id() -> sa.Column[int]:
     return sa.Column("id", sa.BigInteger, sa.Identity(always=True), primary_key=True)
+
+
+def _now(name: str) -> sa.Column[datetime]:
+    return sa.Column(name, sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now())
 
 
 def _created_sources() -> None:
@@ -46,9 +75,7 @@ def _created_sources() -> None:
         ),
         sa.Column("min_interval_s", sa.Float),
         sa.Column("max_requests", sa.Integer),
-        sa.Column(
-            "synced_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
-        ),
+        _now("synced_at"),
         sa.Column("retired_at", sa.DateTime(timezone=True)),
         sa.CheckConstraint("name ~ '^[a-z][a-z0-9_]{0,62}$'", name="sources_name_format"),
         sa.CheckConstraint("type IN ('api', 'inbox')", name="sources_type"),
@@ -61,8 +88,11 @@ def _created_sources() -> None:
             "type <> 'inbox' OR (tos_url IS NULL AND cardinality(allowed_hosts) = 0)",
             name="sources_inbox_is_local",
         ),
+        sa.CheckConstraint("cardinality(allowed_hosts) <= 16", name="sources_hosts_count"),
+        # float accepts NaN and Infinity, and NaN passes ">= 0", so both are named.
         sa.CheckConstraint(
-            "min_interval_s IS NULL OR min_interval_s >= 0", name="sources_interval"
+            "min_interval_s IS NULL OR (min_interval_s >= 0 AND min_interval_s <= 3600)",
+            name="sources_interval",
         ),
         sa.CheckConstraint("max_requests IS NULL OR max_requests > 0", name="sources_max_requests"),
     )
@@ -80,9 +110,7 @@ def _created_runs() -> None:
             nullable=False,
         ),
         sa.Column("status", sa.Text, nullable=False, server_default=sa.text("'running'")),
-        sa.Column(
-            "started_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
-        ),
+        _now("started_at"),
         sa.Column("finished_at", sa.DateTime(timezone=True)),
         sa.Column("n_fetched", sa.Integer, nullable=False, server_default=sa.text("0")),
         sa.Column("n_new", sa.Integer, nullable=False, server_default=sa.text("0")),
@@ -96,6 +124,8 @@ def _created_runs() -> None:
             nullable=False,
             server_default=sa.text("'[]'::jsonb"),
         ),
+        # Target of signals' (run_id, source_id) foreign key.
+        sa.UniqueConstraint("id", "source_id", name="runs_id_source"),
         sa.CheckConstraint("status IN ('running', 'ok', 'partial', 'failed')", name="runs_status"),
         # A run is finished exactly when it has left 'running'.
         sa.CheckConstraint(
@@ -105,7 +135,8 @@ def _created_runs() -> None:
             "finished_at IS NULL OR finished_at >= started_at", name="runs_time_order"
         ),
         sa.CheckConstraint(
-            "n_fetched >= 0 AND n_new >= 0 AND n_skipped >= 0 AND tokens >= 0 AND cost >= 0",
+            "n_fetched >= 0 AND n_new >= 0 AND n_skipped >= 0 AND tokens >= 0 "
+            "AND cost >= 0 AND cost <> 'NaN'",
             name="runs_counts_non_negative",
         ),
         sa.CheckConstraint("char_length(error) <= 4000", name="runs_error_size"),
@@ -115,6 +146,28 @@ def _created_runs() -> None:
         ),
     )
     op.create_index("ix_runs_agent_started", "runs", ["agent", sa.text("started_at DESC")])
+    op.create_index("ix_runs_source_started", "runs", ["source_id", sa.text("started_at DESC")])
+    # A finished run is a logged fact (C5): its counts can never be rewritten later.
+    op.execute(
+        """
+        CREATE FUNCTION runs_finished_is_final() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF OLD.status <> 'running' THEN
+                RAISE EXCEPTION 'run % is finished and cannot change (C5)', OLD.id
+                    USING ERRCODE = 'insufficient_privilege';
+            END IF;
+            RETURN NEW;
+        END;
+        $$
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER runs_finished_is_final BEFORE UPDATE ON runs
+        FOR EACH ROW EXECUTE FUNCTION runs_finished_is_final()
+        """
+    )
 
 
 def _created_signals() -> None:
@@ -127,9 +180,7 @@ def _created_signals() -> None:
             sa.ForeignKey("sources.id", ondelete="RESTRICT"),
             nullable=False,
         ),
-        sa.Column(
-            "run_id", sa.BigInteger, sa.ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False
-        ),
+        sa.Column("run_id", sa.BigInteger, nullable=False),
         sa.Column("external_id", sa.Text, nullable=False),
         sa.Column("url", sa.Text),
         sa.Column("url_canonical", sa.Text),
@@ -140,9 +191,7 @@ def _created_signals() -> None:
         sa.Column("points", sa.Integer),
         sa.Column("num_comments", sa.Integer),
         sa.Column("posted_at", sa.DateTime(timezone=True)),
-        sa.Column(
-            "fetched_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
-        ),
+        _now("fetched_at"),
         sa.Column("content_hash", sa.Text, nullable=False),
         sa.Column("trust", sa.Text, nullable=False, server_default=sa.text("'untrusted'")),
         sa.Column(
@@ -152,6 +201,13 @@ def _created_signals() -> None:
         sa.Column("intent_score", sa.Numeric(6, 3), nullable=False),
         sa.Column("intent_terms", postgresql.ARRAY(sa.Text), nullable=False),
         sa.Column("intent_version", sa.Text, nullable=False),
+        # A signal can only belong to a run of its own source.
+        sa.ForeignKeyConstraint(
+            ["run_id", "source_id"],
+            ["runs.id", "runs.source_id"],
+            name="signals_run_same_source",
+            ondelete="RESTRICT",
+        ),
         sa.UniqueConstraint("source_id", "external_id", name="signals_source_external_id"),
         sa.CheckConstraint(
             "char_length(external_id) BETWEEN 1 AND 512", name="signals_external_id_size"
@@ -170,13 +226,25 @@ def _created_signals() -> None:
         ),
         sa.CheckConstraint("trust IN ('untrusted')", name="signals_trust"),
         sa.CheckConstraint(
-            "jsonb_typeof(raw) = 'object' AND pg_column_size(raw) < 1048576",
+            "cardinality(flags) <= 32 AND cardinality(intent_terms) <= 64",
+            name="signals_array_sizes",
+        ),
+        # Measured as text: pg_column_size is the compressed size, which a
+        # repetitive payload could keep small while the real value is huge.
+        sa.CheckConstraint(
+            "jsonb_typeof(raw) = 'object' AND octet_length(raw::text) < 1048576",
             name="signals_raw_shape",
         ),
-        sa.CheckConstraint("intent_score >= 0", name="signals_intent_score_non_negative"),
+        # NaN sorts above every number in Postgres and would top every ranking.
+        sa.CheckConstraint(
+            "intent_score >= 0 AND intent_score <> 'NaN'", name="signals_intent_score"
+        ),
         sa.CheckConstraint("char_length(intent_version) >= 1", name="signals_intent_version"),
     )
-    op.create_index("ix_signals_source_posted", "signals", ["source_id", sa.text("posted_at DESC")])
+    # Watermark: newest posted_at per source.
+    op.create_index(
+        "ix_signals_source_posted", "signals", ["source_id", sa.text("posted_at DESC NULLS LAST")]
+    )
     op.create_index(
         "ix_signals_source_engagement",
         "signals",
@@ -186,11 +254,58 @@ def _created_signals() -> None:
             sa.text("num_comments DESC NULLS LAST"),
         ],
     )
-    op.create_index("ix_signals_intent", "signals", [sa.text("intent_score DESC")])
+    # `scout stats --top N`: intent, then points, then comments.
+    op.create_index(
+        "ix_signals_rank",
+        "signals",
+        [
+            sa.text("intent_score DESC"),
+            sa.text("points DESC NULLS LAST"),
+            sa.text("num_comments DESC NULLS LAST"),
+            "id",
+        ],
+    )
     op.create_index("ix_signals_fetched_at", "signals", ["fetched_at"])
-    op.create_index("ix_signals_content_hash", "signals", ["content_hash", "posted_at"])
-    op.create_index("ix_signals_url_canonical", "signals", ["url_canonical", "posted_at"])
+    # Recurring pain: group by fingerprint, count distinct sources and days.
+    op.create_index(
+        "ix_signals_content_hash",
+        "signals",
+        ["content_hash"],
+        postgresql_include=["source_id", "posted_at", "fetched_at"],
+    )
+    op.create_index(
+        "ix_signals_url_canonical",
+        "signals",
+        ["url_canonical"],
+        postgresql_include=["source_id", "posted_at", "fetched_at"],
+        postgresql_where=sa.text("url_canonical IS NOT NULL"),
+    )
     op.create_index("ix_signals_run_id", "signals", ["run_id"])
+    # Grants already make signals insert-only; the trigger holds even for a
+    # future role granted too much, as decisions_log's does.
+    op.execute(
+        """
+        CREATE FUNCTION signals_insert_only() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            RAISE EXCEPTION 'signals is insert-only: % blocked', TG_OP
+                USING ERRCODE = 'insufficient_privilege';
+        END;
+        $$
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER signals_no_update_delete BEFORE UPDATE OR DELETE ON signals
+        FOR EACH ROW EXECUTE FUNCTION signals_insert_only()
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER signals_no_truncate BEFORE TRUNCATE ON signals
+        FOR EACH STATEMENT EXECUTE FUNCTION signals_insert_only()
+        """
+    )
 
 
 def _granted() -> None:
@@ -207,9 +322,10 @@ def _granted() -> None:
     )
     op.execute(f"GRANT USAGE ON SCHEMA public TO {SCOUT_ROLE}")
     op.execute(f"GRANT SELECT ON sources TO {SCOUT_ROLE}")
-    op.execute(f"GRANT SELECT, INSERT ON signals TO {SCOUT_ROLE}")
+    # SELECT is needed for RETURNING id and for ON CONFLICT DO NOTHING.
+    op.execute(f"GRANT SELECT, INSERT ({', '.join(SIGNAL_INSERTABLE)}) ON signals TO {SCOUT_ROLE}")
     # SELECT lets Scout read back its own run id and filter UPDATE ... WHERE id = :id.
-    op.execute(f"GRANT SELECT, INSERT ON runs TO {SCOUT_ROLE}")
+    op.execute(f"GRANT SELECT, INSERT ({', '.join(RUN_INSERTABLE)}) ON runs TO {SCOUT_ROLE}")
     op.execute(f"GRANT UPDATE ({', '.join(RUN_UPDATABLE)}) ON runs TO {SCOUT_ROLE}")
     # Scout appends to the log (C10) and may read back only the id it just wrote.
     op.execute(f"GRANT INSERT, SELECT (id) ON decisions_log TO {SCOUT_ROLE}")
@@ -224,9 +340,24 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # signals is the evidence ledger that decisions_log.evidence_ids points into.
+    # Dropping it with rows in it would orphan that history, so refuse.
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT FROM signals) THEN
+                RAISE EXCEPTION 'refusing to downgrade 0002: signals has rows';
+            END IF;
+        END
+        $$
+        """
+    )
     op.execute(f"REVOKE ALL ON sources, signals, runs FROM {APP_ROLE}, {SCOUT_ROLE}")
     op.execute(f"REVOKE ALL ON decisions_log FROM {SCOUT_ROLE}")
     op.execute(f"REVOKE USAGE ON SCHEMA public FROM {SCOUT_ROLE}")
-    op.drop_table("signals")
+    op.drop_table("signals")  # drops its triggers too
     op.drop_table("runs")
     op.drop_table("sources")
+    op.execute("DROP FUNCTION signals_insert_only()")
+    op.execute("DROP FUNCTION runs_finished_is_final()")
