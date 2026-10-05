@@ -168,6 +168,8 @@ class GuardedClient:
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         user_agent: str | None = None,
+        proxy: str | None = None,
+        ca_bundle: str | None = None,
     ) -> None:
         if not source.enabled:
             raise SourceDisabled(f"source {source.name!r} is disabled")
@@ -182,7 +184,11 @@ class GuardedClient:
         # Pinned CA bundle and no environment: proxies, netrc and SSL_CERT_FILE can't
         # change where we connect or whom we trust.
         tls = ssl.create_default_context(cafile=certifi.where())
-        inner = httpx.AsyncHTTPTransport(verify=tls, trust_env=False)
+        if ca_bundle:
+            # Added to, never replacing, the public roots: for an inspecting proxy.
+            tls.load_verify_locations(cafile=ca_bundle)
+        # The allowlist and DNS checks still run on the target URL when a proxy is set.
+        inner = httpx.AsyncHTTPTransport(verify=tls, trust_env=False, proxy=proxy)
         self._transport = _GuardTransport(
             frozenset(source.allowed_hosts), self.pacer, resolver, inner
         )

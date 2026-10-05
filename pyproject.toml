@@ -19,6 +19,10 @@ dependencies = [
     "uvicorn[standard]>=0.30",
 ]
 
+
+[project.scripts]
+jokr = "jokr.cli:main"
+
 [dependency-groups]
 dev = [
     "httpx2>=2.13",

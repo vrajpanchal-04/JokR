@@ -29,6 +29,10 @@ class ScoutSettings(Settings):
     reddit_client_secret: SecretStr | None = None
     reddit_user_agent: Annotated[str, Field(pattern=_REDDIT_UA)] | None = None
     inbox_root: Path = Path("data/inbox")
+    # Opt-in egress proxy and CA bundle, for networks that only allow a proxy.
+    # GuardedClient ignores the environment, so these are the only way to set one.
+    scout_https_proxy: str | None = None
+    scout_ca_bundle: Path | None = None
 
     @field_validator("reddit_client_id", "reddit_client_secret", "reddit_user_agent", mode="before")
     @classmethod
