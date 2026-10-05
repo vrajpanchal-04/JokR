@@ -1,5 +1,6 @@
 # Install once: uv run pre-commit install
-exclude: ^\.claude/
+# .claude/ is vendored tooling, except hooks/, which is ours and gets every check.
+exclude: ^\.claude/(?!hooks/)
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -18,8 +19,7 @@ repos:
         args: [--fix]
       - id: ruff-format
 
-  # Claude Code hook scripts are excluded above with the rest of .claude/,
-  # but they are ours, so lint them explicitly.
+  # Our Claude Code hook scripts.
   - repo: https://github.com/shellcheck-py/shellcheck-py
     rev: v0.11.0.1
     hooks:
