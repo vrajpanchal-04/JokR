@@ -1,22 +1,66 @@
-# Source allowlist (C3, blueprint §4.2). Anything not listed here may not be read.
+# Source allowlist (C3, blueprint §4.2). This file is the only authority on what
+# Scout may read: a source runs only if it is listed and enabled here, and its
+# connector can only reach `allowed_hosts` (exact match, HTTPS only).
 # Everything is off until its connector ships (P1).
 sources:
   - name: hackernews
     type: api
-    tos_url: https://github.com/HackerNews/API
-    rate_limit_per_min: 60
     enabled: false
+    tos_url: https://hn.algolia.com/api
+    allowed_hosts: [hn.algolia.com]
+    min_interval_s: 1.0
+    max_requests: 60
+    params:
+      kind: hackernews
+      # Commercial-intent phrases (P1 plan §3b): money already being spent,
+      # budgets, and switching away from incumbents.
+      queries:
+        - "internal tool for"
+        - "custom script to"
+        - "we built our own"
+        - "budget for"
+        - "procurement"
+        - "alternative to"
+        - "switching from"
+        - "would pay for"
+        - "is there a tool"
+      tags: [story, ask_hn, comment]
+      hits_per_page: 100
+      lookback_days: 30
+
   - name: reddit
     type: api
+    enabled: false   # needs API keys and Reddit's commercial-use approval
     tos_url: https://redditinc.com/policies/data-api-terms
-    rate_limit_per_min: 60
-    enabled: false
+    allowed_hosts: [www.reddit.com, oauth.reddit.com]
+    min_interval_s: 1.0
+    max_requests: 60
+    params:
+      kind: reddit
+      subreddits: [SaaS, smallbusiness, Entrepreneur, sysadmin, dataengineering]
+      listing: new
+      limit: 100
+
   - name: arxiv
     type: api
-    tos_url: https://info.arxiv.org/help/api/tou.html
-    rate_limit_per_min: 20
     enabled: false
+    tos_url: https://info.arxiv.org/help/api/tou.html
+    allowed_hosts: [export.arxiv.org]
+    min_interval_s: 3.0   # arXiv terms: at most one request every 3 seconds
+    max_requests: 20
+    params:
+      kind: arxiv
+      categories: [cs.AI, cs.LG, cs.HC]
+      page_size: 100
+      lookback_days: 14
+
   - name: inbox
     type: inbox
-    path: data/inbox
     enabled: false
+    path: data/inbox
+    params:
+      kind: inbox
+      max_file_bytes: 5000000
+      max_rows_per_file: 10000
+      max_files: 100
+      max_depth: 2

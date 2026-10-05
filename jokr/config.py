@@ -5,7 +5,7 @@ JokR, not silently fall back to a default (C6).
 """
 
 from decimal import Decimal
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal, Self
 
 import yaml
@@ -81,26 +81,104 @@ class Scoring(_Strict):
     needs_evidence_min_weight: Weight
 
 
+# A plain, lowercase, public FQDN: no scheme, port, userinfo, wildcard, trailing
+# dot or IP literal (the TLD must be alphabetic). Exact match is the only rule
+# GuardedClient applies, so anything looser here would widen C3.
+_HOST = r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+Host = Annotated[str, Field(pattern=_HOST, max_length=253)]
+Query = Annotated[str, Field(min_length=1, max_length=200)]
+
+
+class HackerNewsParams(_Strict):
+    kind: Literal["hackernews"]
+    queries: Annotated[tuple[Query, ...], Field(min_length=1)]
+    tags: Annotated[
+        tuple[Literal["story", "ask_hn", "show_hn", "comment"], ...], Field(min_length=1)
+    ] = ("story", "ask_hn", "comment")
+    hits_per_page: Annotated[int, Field(ge=1, le=1000)] = 100
+    lookback_days: Annotated[int, Field(ge=1, le=365)] = 30
+
+
+class RedditParams(_Strict):
+    kind: Literal["reddit"]
+    subreddits: Annotated[
+        tuple[Annotated[str, Field(pattern=r"^[A-Za-z0-9_]{2,21}$")], ...], Field(min_length=1)
+    ]
+    listing: Literal["new", "top", "hot"] = "new"
+    limit: Annotated[int, Field(ge=1, le=100)] = 100
+
+
+class ArxivParams(_Strict):
+    kind: Literal["arxiv"]
+    categories: Annotated[
+        tuple[Annotated[str, Field(pattern=r"^[a-z-]+(\.[A-Za-z]{2})?$")], ...], Field(min_length=1)
+    ]
+    page_size: Annotated[int, Field(ge=1, le=2000)] = 100
+    lookback_days: Annotated[int, Field(ge=1, le=365)] = 14
+
+
+class InboxParams(_Strict):
+    kind: Literal["inbox"]
+    max_file_bytes: Annotated[int, Field(gt=0, le=50_000_000)] = 5_000_000
+    max_rows_per_file: Annotated[int, Field(gt=0, le=100_000)] = 10_000
+    max_files: Annotated[int, Field(gt=0, le=1_000)] = 100
+    max_depth: Annotated[int, Field(ge=0, le=5)] = 2
+
+
+SourceParams = Annotated[
+    HackerNewsParams | RedditParams | ArxivParams | InboxParams, Field(discriminator="kind")
+]
+
+
 class Source(_Strict):
     name: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*$")]
     type: Literal["api", "inbox"]
     enabled: bool
+    params: SourceParams
     tos_url: HttpUrl | None = None
-    rate_limit_per_min: Annotated[int, Field(gt=0)] | None = None
+    allowed_hosts: tuple[Host, ...] = ()
+    min_interval_s: Annotated[float, Field(ge=0, le=3600)] | None = None
+    max_requests: Annotated[int, Field(gt=0, le=10_000)] | None = None
     path: str | None = None
 
     @model_validator(mode="after")
     def _fields_for_type(self) -> Self:
-        # C3: an API source must name the terms it is read under and a rate limit.
-        if self.type == "api" and (self.tos_url is None or self.rate_limit_per_min is None):
-            raise ValueError(f"api source {self.name!r} needs tos_url and rate_limit_per_min")
-        if self.type == "inbox" and not self.path:
-            raise ValueError(f"inbox source {self.name!r} needs path")
+        # One connector per source: the params kind picks the connector, so it
+        # must match the name or a source could borrow another's behaviour.
+        if self.params.kind != self.name:
+            raise ValueError(f"params.kind {self.params.kind!r} must equal source name")
+        if self.type == "api":
+            # C3: an API source must name its terms, its hosts and its pacing.
+            missing = [
+                f for f in ("tos_url", "min_interval_s", "max_requests") if getattr(self, f) is None
+            ]
+            if not self.allowed_hosts:
+                missing.append("allowed_hosts")
+            if missing:
+                raise ValueError(f"api source {self.name!r} needs {', '.join(missing)}")
+        else:
+            if self.allowed_hosts or self.tos_url is not None:
+                raise ValueError(f"inbox source {self.name!r} cannot have hosts or tos_url")
+            if not self.path or not _inside_data_dir(self.path):
+                raise ValueError(f"inbox source {self.name!r} needs a path under data/")
         return self
+
+
+def _inside_data_dir(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    return (
+        not PurePosixPath(path).is_absolute()
+        and ".." not in parts
+        and len(parts) >= 2
+        and parts[0] == "data"
+    )
 
 
 class Sources(_Strict):
     sources: list[Source]
+
+    def get(self, name: str) -> Source | None:
+        return next((s for s in self.sources if s.name == name), None)
 
     @model_validator(mode="after")
     def _unique_names(self) -> Self:
