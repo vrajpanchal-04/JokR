@@ -1,11 +1,11 @@
 # Source allowlist (C3, blueprint §4.2). This file is the only authority on what
 # Scout may read: a source runs only if it is listed and enabled here, and its
 # connector can only reach `allowed_hosts` (exact match, HTTPS only).
-# Everything is off until its connector ships (P1).
+# Reddit stays off until API keys and Reddit's commercial-use approval exist.
 sources:
   - name: hackernews
     type: api
-    enabled: false
+    enabled: true
     tos_url: https://hn.algolia.com/api
     allowed_hosts: [hn.algolia.com]
     min_interval_s: 1.0
@@ -55,7 +55,7 @@ sources:
 
   - name: arxiv
     type: api
-    enabled: false
+    enabled: true
     tos_url: https://info.arxiv.org/help/api/tou.html
     allowed_hosts: [export.arxiv.org]
     min_interval_s: 3.0   # arXiv terms: at most one request every 3 seconds
@@ -68,7 +68,7 @@ sources:
 
   - name: inbox
     type: inbox
-    enabled: false
+    enabled: true
     path: data/inbox
     params:
       kind: inbox

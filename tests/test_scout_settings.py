@@ -66,3 +66,9 @@ def test_blank_reddit_values_mean_not_configured() -> None:
     s = _scout(reddit_client_id="", reddit_client_secret=" ", reddit_user_agent="")
     assert s.reddit_client_id is None
     assert not s.reddit_configured
+
+
+def test_blank_proxy_settings_mean_no_proxy() -> None:
+    s = _scout(scout_https_proxy="", scout_ca_bundle=" ")
+    assert s.scout_https_proxy is None
+    assert s.scout_ca_bundle is None

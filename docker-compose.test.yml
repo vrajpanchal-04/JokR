@@ -16,6 +16,9 @@ services:
   api:
     profiles: ["never"]
 
+  scout:
+    profiles: ["never"]
+
   test:
     build:
       context: .

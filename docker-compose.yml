@@ -21,14 +21,17 @@ services:
       timeout: 5s
       retries: 10
 
-  # One-shot: applies migrations as the table owner, then exits. Idempotent (A8).
+  # One-shot: applies migrations and mirrors config/sources.yaml into the
+  # sources table, both as the table owner, then exits. Idempotent (A8).
   migrate:
     build:
       context: .
       target: base
-    command: ["alembic", "upgrade", "head"]
+    command: ["sh", "-c", "alembic upgrade head && jokr sources sync"]
     environment:
       MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?set in .env}
+      DATABASE_URL: ${MIGRATION_DATABASE_URL:?set in .env}
+      JOKR_CONFIG_DIR: /app/config
     depends_on:
       db:
         condition: service_healthy
@@ -47,6 +50,33 @@ services:
         condition: service_completed_successfully
     ports:
       - "127.0.0.1:8000:8000"
+
+  # Batch job, not a server: `docker compose run --rm scout` (P8 schedules it).
+  # Runs as jokr_scout and is the only service that sees Scout's secrets.
+  scout:
+    build:
+      context: .
+      target: base
+    profiles: ["jobs"]
+    command: ["jokr", "scout", "run"]
+    restart: "no"
+    healthcheck:
+      disable: true
+    environment:
+      DATABASE_URL: ${SCOUT_DATABASE_URL:?set in .env}
+      AUTHOR_HASH_SALT: ${AUTHOR_HASH_SALT:?set in .env}
+      REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID:-}
+      REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET:-}
+      REDDIT_USER_AGENT: ${REDDIT_USER_AGENT:-}
+      SCOUT_HTTPS_PROXY: ${SCOUT_HTTPS_PROXY:-}
+      JOKR_CONFIG_DIR: /app/config
+      INBOX_ROOT: /data/inbox
+    volumes:
+      # Read-only: Scout never moves, edits or deletes your files.
+      - ./data/inbox:/data/inbox:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   pgdata:

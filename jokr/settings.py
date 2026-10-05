@@ -34,7 +34,14 @@ class ScoutSettings(Settings):
     scout_https_proxy: str | None = None
     scout_ca_bundle: Path | None = None
 
-    @field_validator("reddit_client_id", "reddit_client_secret", "reddit_user_agent", mode="before")
+    @field_validator(
+        "reddit_client_id",
+        "reddit_client_secret",
+        "reddit_user_agent",
+        "scout_https_proxy",
+        "scout_ca_bundle",
+        mode="before",
+    )
     @classmethod
     def _blank_is_unset(cls, value: object) -> object:
         # `.env.example` ships these as `KEY=`; an empty value means "not configured".

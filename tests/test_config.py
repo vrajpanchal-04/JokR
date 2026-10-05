@@ -37,7 +37,9 @@ def test_repo_config_loads_with_blueprint_defaults() -> None:
     assert cfg.caps.max_live_bets == 5
     assert len(cfg.fit_rules.rules) == 6
     assert cfg.scoring.g1_threshold == Decimal("6.5")
-    assert all(not s.enabled for s in cfg.sources.sources)
+    enabled = {s.name for s in cfg.sources.sources if s.enabled}
+    # P1 ships these three; Reddit waits for keys and commercial-use approval.
+    assert enabled == {"hackernews", "arxiv", "inbox"}
 
 
 def test_unknown_cap_key_is_rejected(config_dir: Path) -> None:
