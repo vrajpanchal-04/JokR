@@ -7,8 +7,10 @@ from typing import Any
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
-from jokr.config import ArxivParams, ConfigError, HackerNewsParams, load_config
+from jokr.config import ArxivParams, ConfigError, HackerNewsParams, Source, load_config
+from tests.guard_helpers import api_source
 
 REPO_CONFIG = Path(__file__).resolve().parent.parent / "config"
 
@@ -141,3 +143,29 @@ def test_inbox_path_must_stay_inside_repo_data(config_dir: Path) -> None:
 
     with pytest.raises(ConfigError, match="path"):
         load_config(config_dir)
+
+
+def test_repo_sources_include_platform_review_additions() -> None:
+    cfg = load_config(Path(__file__).resolve().parents[1] / "config")
+    hn = cfg.sources.get("hackernews")
+    reddit = cfg.sources.get("reddit")
+    assert hn is not None and reddit is not None
+    assert hn.params.kind == "hackernews"
+    assert set(hn.params.browse_tags) == {"ask_hn", "show_hn"}
+    assert reddit.params.kind == "reddit"
+    assert {"startups", "SideProject", "Business_Ideas", "StartupIdeas"} <= set(
+        reddit.params.subreddits
+    )
+    assert all(s.max_runtime_s <= 900 for s in cfg.sources.sources)
+
+
+@pytest.mark.parametrize("value", [0, 3601])
+def test_max_runtime_is_bounded(value: int) -> None:
+    data = api_source().model_dump(mode="json")
+    data["max_runtime_s"] = value
+    with pytest.raises(ValidationError, match="max_runtime_s"):
+        Source.model_validate(data)
+
+
+def test_max_runtime_defaults_to_five_minutes() -> None:
+    assert api_source().max_runtime_s == 300

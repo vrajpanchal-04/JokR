@@ -9,7 +9,8 @@ sources:
     tos_url: https://hn.algolia.com/api
     allowed_hosts: [hn.algolia.com]
     min_interval_s: 1.0
-    max_requests: 60
+    max_requests: 120
+    max_runtime_s: 600
     params:
       kind: hackernews
       # Commercial-intent phrases (P1 plan §3b): money already being spent,
@@ -25,6 +26,8 @@ sources:
         - "would pay for"
         - "is there a tool"
       tags: [story, ask_hn, comment]
+      # Plus every recent Ask HN and Show HN post, no query needed.
+      browse_tags: [ask_hn, show_hn]
       hits_per_page: 100
       lookback_days: 30
 
@@ -37,7 +40,16 @@ sources:
     max_requests: 60
     params:
       kind: reddit
-      subreddits: [SaaS, smallbusiness, Entrepreneur, sysadmin, dataengineering]
+      subreddits:
+        - SaaS
+        - smallbusiness
+        - Entrepreneur
+        - sysadmin
+        - dataengineering
+        - startups
+        - SideProject
+        - Business_Ideas
+        - StartupIdeas
       listing: new
       limit: 100
 

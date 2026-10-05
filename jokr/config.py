@@ -95,6 +95,9 @@ class HackerNewsParams(_Strict):
     tags: Annotated[
         tuple[Literal["story", "ask_hn", "show_hn", "comment"], ...], Field(min_length=1)
     ] = ("story", "ask_hn", "comment")
+    # Fetched whole, with no query: every recent Ask HN ("is there a tool for...")
+    # and Show HN post is a candidate pain or competitor signal.
+    browse_tags: tuple[Literal["ask_hn", "show_hn"], ...] = ("ask_hn", "show_hn")
     hits_per_page: Annotated[int, Field(ge=1, le=1000)] = 100
     lookback_days: Annotated[int, Field(ge=1, le=365)] = 30
 
@@ -139,6 +142,8 @@ class Source(_Strict):
     allowed_hosts: tuple[Host, ...] = ()
     min_interval_s: Annotated[float, Field(ge=0, le=3600)] | None = None
     max_requests: Annotated[int, Field(gt=0, le=10_000)] | None = None
+    # Wall-clock limit for one source in one run, so a slow site can't stall Scout.
+    max_runtime_s: Annotated[int, Field(ge=1, le=3600)] = 300
     path: str | None = None
 
     @model_validator(mode="after")

@@ -108,6 +108,75 @@ def scan_flags(text: str) -> frozenset[str]:
     return frozenset(name for name, pattern in _FLAG_PATTERNS if pattern.search(text))
 
 
+# --- identity scrubbing --------------------------------------------------------
+
+USER = "[user]"
+EMAIL = "[email]"
+_NAME = r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,38}"
+# A host must start a URL or a word, so "dropbox.com" never matches "x.com".
+_HOST_START = r"(?<![\w.-])(?:www\.|m\.|old\.|mobile\.)?"
+_IDENTITY: tuple[tuple[re.Pattern[str], str], ...] = (
+    # Profile links. Only the name is replaced; the rest of the link stays readable.
+    (re.compile(_HOST_START + rf"((?:twitter|x)\.com/){_NAME}", re.I), rf"\1{USER}"),
+    (re.compile(_HOST_START + rf"(linkedin\.com/(?:in|pub)/){_NAME}", re.I), rf"\1{USER}"),
+    (re.compile(_HOST_START + rf"(reddit\.com/(?:u|user)/){_NAME}", re.I), rf"\1{USER}"),
+    (
+        re.compile(_HOST_START + rf"((?:instagram|facebook|fb)\.com/){_NAME}", re.I),
+        rf"\1{USER}",
+    ),
+    # GitHub/GitLab: a bare /name is a profile; /org/repo/... is a project and stays.
+    (
+        re.compile(
+            _HOST_START + r"((?:github|gitlab)\.com/)[A-Za-z0-9-]{1,39}(?=/?(?:[\s?#)\]>\"']|$))",
+            re.I,
+        ),
+        rf"\1{USER}",
+    ),
+    (re.compile(r"(news\.ycombinator\.com/user\?id=)[A-Za-z0-9_-]+", re.I), rf"\1{USER}"),
+    # /@name on any site: Mastodon, Threads, TikTok, YouTube, Medium.
+    (re.compile(r"(?<=/)@[A-Za-z0-9_.]{1,30}"), f"@{USER}"),
+    (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"), EMAIL),
+    # Reddit-style u/name and /user/name in prose.
+    (re.compile(r"(?<![\w/])/?u/[A-Za-z0-9_-]{3,20}"), f"u/{USER}"),
+    (re.compile(r"(?<![\w])/user/[A-Za-z0-9_-]{3,20}"), f"/user/{USER}"),
+    # @handle, but not "python@3.12", "a @ b" or the placeholder itself.
+    (re.compile(r"(?<![\w@./+-])@[A-Za-z_][A-Za-z0-9_.]{1,30}"), f"@{USER}"),
+)
+
+
+@dataclass(frozen=True)
+class Scrubbed:
+    text: str
+    changed: bool
+
+
+def scrub_identity(text: str) -> Scrubbed:
+    """Replace handles, emails and profile links. Authors are hashed; nobody else is stored."""
+    out = text
+    for pattern, replacement in _IDENTITY:
+        out = pattern.sub(replacement, out)
+    return Scrubbed(out, out != text)
+
+
+def _scrub_strings(value: Any, depth: int = 0) -> tuple[Any, bool]:
+    if depth > _RAW_DEPTH:
+        return None, True
+    if isinstance(value, str):
+        scrubbed = scrub_identity(value)
+        return scrubbed.text, scrubbed.changed
+    if isinstance(value, dict):
+        changed = False
+        result: dict[str, Any] = {}
+        for k, v in value.items():
+            result[k], c = _scrub_strings(v, depth + 1)
+            changed |= c
+        return result, changed
+    if isinstance(value, list):
+        pairs = [_scrub_strings(v, depth + 1) for v in value]
+        return [v for v, _ in pairs], any(c for _, c in pairs)
+    return value, False
+
+
 # --- hashing --------------------------------------------------------------------
 
 
@@ -215,12 +284,13 @@ def _checked_ids(item: FetchedItem) -> None:
             raise IngestRejected(f"{name} is negative")
 
 
-def _safe_raw(raw: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
+def _safe_raw(raw: Mapping[str, Any]) -> tuple[dict[str, Any], set[str]]:
     stripped = strip_author_fields(raw)
     size = len(json.dumps(stripped, default=str, ensure_ascii=False).encode())
     if size > MAX_RAW_BYTES:
-        return {"_omitted": "raw over 512 KB"}, True
-    return stripped, False
+        return {"_omitted": "raw over 512 KB"}, {"raw_omitted"}
+    scrubbed, changed = _scrub_strings(stripped)
+    return scrubbed, {"identity_scrubbed"} if changed else set()
 
 
 def prepare(item: FetchedItem, *, source: str, salt: bytes, lexicon: IntentLexicon) -> SignalRow:
@@ -231,18 +301,21 @@ def prepare(item: FetchedItem, *, source: str, salt: bytes, lexicon: IntentLexic
 
     body = clean_text(item.text)
     title = clean_text(item.title, limit=4 * MAX_TITLE_CHARS) if item.title is not None else None
-    title_text = title.text[:MAX_TITLE_CHARS] if title else None
-    if not body.text.strip() and not title_text:
+    body_text = scrub_identity(body.text)
+    title_scrub = scrub_identity(title.text[:MAX_TITLE_CHARS]) if title else None
+    title_text = title_scrub.text if title_scrub else None
+    if not body_text.text.strip() and not title_text:
         raise IngestRejected("empty after cleaning")
 
     flags = set(body.flags) | (set(title.flags) if title else set())
-    if title and title.text != title_text:
+    if title and len(title.text) > MAX_TITLE_CHARS:
         flags.add("truncated")
-    combined = f"{title_text or ''}\n{body.text}"
+    if body_text.changed or (title_scrub and title_scrub.changed):
+        flags.add("identity_scrubbed")
+    combined = f"{title_text or ''}\n{body_text.text}"
     flags |= scan_flags(combined)
-    raw, omitted = _safe_raw(item.raw)
-    if omitted:
-        flags.add("raw_omitted")
+    raw, raw_flags = _safe_raw(item.raw)
+    flags |= raw_flags
     intent = score_intent(combined, lexicon)
 
     return SignalRow(
@@ -251,12 +324,12 @@ def prepare(item: FetchedItem, *, source: str, salt: bytes, lexicon: IntentLexic
         url_canonical=canonical_url(item.url),
         locator=item.locator,
         title=title_text,
-        text=body.text,
+        text=body_text.text,
         author_hash=author_hash(salt, source, item.author) if item.author else None,
         points=item.points,
         num_comments=item.num_comments,
         posted_at=item.posted_at,
-        content_hash=content_hash(title_text, body.text),
+        content_hash=content_hash(title_text, body_text.text),
         flags=tuple(sorted(flags)),
         raw=raw,
         intent_score=intent.score,

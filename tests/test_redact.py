@@ -44,7 +44,8 @@ def test_ordinary_text_is_untouched() -> None:
     )
 )
 def test_any_bearer_value_is_masked(value: str) -> None:
-    assert value not in redact(f"Authorization: Bearer {value}")
+    # Exact match, not "value not in": a value like "[REDACTE" is inside the placeholder.
+    assert redact(f"Authorization: Bearer {value}") == f"Authorization: Bearer {REDACTED}"
 
 
 def test_secret_holder_never_prints_its_value() -> None:

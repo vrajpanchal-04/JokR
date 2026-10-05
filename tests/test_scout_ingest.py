@@ -17,6 +17,7 @@ from jokr.agents.scout_ingest import (
     content_hash,
     prepare,
     scan_flags,
+    scrub_identity,
     strip_author_fields,
 )
 from jokr.config import IntentLexicon
@@ -279,3 +280,63 @@ def test_prepare_shrinks_oversized_raw() -> None:
 def test_prepare_requires_a_real_salt() -> None:
     with pytest.raises(ValueError, match="salt"):
         prepare(_item(), source="hn", salt=b"short", lexicon=LEX)
+
+
+# --- identity scrubbing ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "gone"),
+    [
+        ("ping @jane_doe about it", "jane_doe"),
+        ("as u/throwaway123 said", "throwaway123"),
+        ("see /u/someone and /user/other", "someone"),
+        ("mail me: jane.doe+x@example.com", "jane.doe"),
+        ("https://twitter.com/janedoe/status/1", "janedoe"),
+        ("https://x.com/janedoe", "janedoe"),
+        ("https://www.linkedin.com/in/jane-doe-123/", "jane-doe-123"),
+        ("https://github.com/janedoe", "janedoe"),
+        ("https://www.reddit.com/user/janedoe/", "janedoe"),
+        ("https://news.ycombinator.com/user?id=janedoe", "janedoe"),
+        ("https://instagram.com/janedoe", "janedoe"),
+        ("https://mastodon.social/@janedoe", "janedoe"),
+    ],
+)
+def test_identity_is_scrubbed(text: str, gone: str) -> None:
+    out = scrub_identity(text)
+    assert gone not in out.text
+    assert out.changed
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Our payroll pipeline breaks at 3am",
+        "email support costs us $2k/month",
+        "see https://github.com/org/repo/issues/12 for the bug",
+        "python@3.12 and node@20",
+        "price: 5 @ $10",
+    ],
+)
+def test_ordinary_text_survives_scrubbing(text: str) -> None:
+    out = scrub_identity(text)
+    assert out.text == text
+    assert not out.changed
+
+
+def test_prepare_scrubs_text_title_and_raw() -> None:
+    item = _item(
+        title="Question from @jane",
+        text="DM u/jane or jane@example.com",
+        raw={"objectID": "1", "story_text": "by @jane", "nested": [{"note": "x.com/jane"}]},
+    )
+    row = prepare(item, source="hn", salt=SALT, lexicon=LEX)
+    blob = json.dumps(row.raw) + (row.title or "") + row.text
+    assert "jane" not in blob
+    assert "identity_scrubbed" in row.flags
+
+
+@given(st.text(max_size=500))
+def test_scrubbing_is_idempotent(text: str) -> None:
+    once = scrub_identity(text).text
+    assert scrub_identity(once).text == once
