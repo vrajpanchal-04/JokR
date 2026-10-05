@@ -189,6 +189,36 @@ class Sources(_Strict):
         return self
 
 
+IntentTerm = Annotated[
+    str, Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9 +#./'-]*$")
+]
+
+
+class IntentGroup(_Strict):
+    name: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*$", max_length=32)]
+    # Weights never go below 1: the score is a boost for intent, never a penalty.
+    weight: Annotated[float, Field(ge=1, le=10)]
+    terms: Annotated[tuple[IntentTerm, ...], Field(min_length=1)]
+
+
+class IntentLexicon(_Strict):
+    """config/intent.yaml: the commercial-intent lexicon (§3b). Bump `version` on any edit."""
+
+    version: Annotated[str, Field(min_length=1, max_length=32)]
+    cap: Annotated[float, Field(ge=1, le=999)]
+    groups: Annotated[tuple[IntentGroup, ...], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def _unique_names_and_terms(self) -> Self:
+        names = [g.name for g in self.groups]
+        if len(names) != len(set(names)):
+            raise ValueError("duplicate intent group names")
+        terms = [t for g in self.groups for t in g.terms]
+        if len(terms) != len(set(terms)):
+            raise ValueError("an intent term appears more than once")
+        return self
+
+
 class JokrConfig(_Strict):
     caps: Caps
     fit_rules: FitRules
@@ -216,3 +246,8 @@ def load_config(config_dir: Path) -> JokrConfig:
         scoring=_load(config_dir, "scoring.yaml", Scoring),
         sources=_load(config_dir, "sources.yaml", Sources),
     )
+
+
+def load_intent(config_dir: Path) -> IntentLexicon:
+    """Scout's lexicon. Separate from load_config because only Scout needs it."""
+    return _load(config_dir, "intent.yaml", IntentLexicon)
