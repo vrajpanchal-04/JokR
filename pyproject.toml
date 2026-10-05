@@ -49,13 +49,35 @@ target-version = "py312"
 extend-exclude = [".claude"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF"]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "TID251"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["jokr"]
 
+
+# C3, structurally: connectors reach the network only through the GuardedClient
+# Scout hands them, and parse XML only with defusedxml. Scoped to jokr/connectors
+# by the per-file-ignores below. tests/test_connector_import_ban.py proves it bites.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"httpx".msg = "connectors use the GuardedClient they are given"
+"urllib".msg = "connectors use the GuardedClient they are given"
+"http.client".msg = "connectors use the GuardedClient they are given"
+"requests".msg = "connectors use the GuardedClient they are given"
+"aiohttp".msg = "connectors use the GuardedClient they are given"
+"socket".msg = "no raw sockets in connectors"
+"ssl".msg = "no raw TLS in connectors"
+"asyncio.open_connection".msg = "no raw sockets in connectors"
+"asyncio.open_unix_connection".msg = "no raw sockets in connectors"
+"subprocess".msg = "no child processes in connectors"
+"asyncio.create_subprocess_exec".msg = "no child processes in connectors"
+"asyncio.create_subprocess_shell".msg = "no child processes in connectors"
+"os.system".msg = "no child processes in connectors"
+"os.popen".msg = "no child processes in connectors"
+"xml".msg = "parse XML with defusedxml only"
+
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106"]
+"!jokr/connectors/**" = ["TID251"]
 
 [tool.mypy]
 python_version = "3.12"
