@@ -24,6 +24,9 @@ class FetchedItem:
     num_comments: int | None = None
     posted_at: datetime | None = None
     raw: Mapping[str, Any] = field(default_factory=dict)
+    # Problems the connector noticed but kept the item for (e.g. "encoding_replaced").
+    # Ingest adds them to the signal's flags.
+    flags: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -32,6 +35,14 @@ class Rejection:
 
     locator: str
     reason: str
+
+
+class MalformedResponse(ValueError):
+    """The source answered, but not in the shape its API documents.
+
+    Raised rather than treated as "no results", so a changed or broken API
+    fails the run visibly instead of looking like a quiet day.
+    """
 
 
 class Connector(Protocol):

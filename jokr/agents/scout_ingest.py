@@ -365,6 +365,7 @@ class SignalRow:
 
 
 FUTURE_SLACK = timedelta(days=1)
+_FLAG_NAME = re.compile(r"[a-z_]{1,40}")
 
 
 def _checked_ids(item: FetchedItem) -> None:
@@ -423,6 +424,7 @@ def prepare(
         raise IngestRejected("empty after cleaning")
 
     flags = set(body.flags) | (set(title.flags) if title else set())
+    flags |= {f for f in item.flags if _FLAG_NAME.fullmatch(f)}
     if title and len(title.text) > MAX_TITLE_CHARS:
         flags.add("truncated")
     if body_text.changed or (title_scrub and title_scrub.changed):

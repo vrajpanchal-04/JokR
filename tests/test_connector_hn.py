@@ -6,10 +6,11 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 import respx
 
 from jokr.config import HackerNewsParams
-from jokr.connectors.base import FetchedItem
+from jokr.connectors.base import FetchedItem, MalformedResponse, Rejection
 from jokr.connectors.hn import ALGOLIA_MAX_HITS, SEARCH_URL, HackerNewsConnector
 from jokr.guards.tos import GuardedClient
 from tests.guard_helpers import api_source, no_sleep, public_resolver
@@ -145,3 +146,72 @@ async def test_malformed_hits_become_rejections() -> None:
     rejected = [i for i in items if not isinstance(i, FetchedItem)]
     assert len(rejected) == 2
     assert all(r.locator.startswith("hn:") for r in rejected)
+
+
+# --- review hardening: nothing is lost or admitted without a trace ----------------
+
+
+@respx.mock
+async def test_response_without_a_hits_list_fails_loudly() -> None:
+    respx.get(SEARCH_URL).respond(json={"nbHits": 1, "nbPages": 1, "hits": "nope"})
+    with pytest.raises(MalformedResponse, match="hits"):
+        await _collect(_params())
+
+
+@respx.mock
+async def test_response_without_counts_fails_loudly() -> None:
+    respx.get(SEARCH_URL).respond(json={"hits": []})
+    with pytest.raises(MalformedResponse, match="nbHits"):
+        await _collect(_params())
+
+
+@respx.mock
+async def test_window_that_cannot_split_reports_truncation() -> None:
+    body = {**FIXTURE, "nbHits": ALGOLIA_MAX_HITS + 500, "nbPages": 1}
+    respx.get(SEARCH_URL).respond(json=body)
+    items = await _collect(_params(lookback_days=1))
+    truncated = [i for i in items if isinstance(i, Rejection) and "1000" in i.reason]
+    assert truncated
+
+
+@respx.mock
+async def test_repeated_rejections_are_all_counted() -> None:
+    bad = {**FIXTURE, "hits": [{"objectID": "x"}, {"objectID": "y"}]}
+    respx.get(SEARCH_URL).respond(json=bad)
+    items = await _collect(_params(queries=["a", "b"]))
+    assert len(items) == 4
+
+
+@respx.mock
+async def test_raw_keeps_no_author_tag_or_duplicate_text() -> None:
+    respx.get(SEARCH_URL).respond(json=FIXTURE)
+    items = await _collect(_params())
+    ask = next(i for i in items if i.external_id == "41000001")
+    assert "author_fixture_user_a" not in json.dumps(ask.raw)
+    assert "story_text" not in ask.raw and "comment_text" not in ask.raw
+    assert "ask_hn" in ask.raw["_tags"]
+
+
+@pytest.mark.parametrize(
+    "hit",
+    [
+        {"objectID": "5", "created_at_i": 10**20, "title": "x"},
+        {"objectID": "5", "created_at_i": 1790000000, "title": ["not", "text"]},
+        {"objectID": "5", "created_at_i": 1790000000, "title": "x", "story_text": 42},
+        {"objectID": "5", "created_at_i": True, "title": "x"},
+    ],
+)
+@respx.mock
+async def test_malformed_fields_become_rejections(hit: dict[str, Any]) -> None:
+    respx.get(SEARCH_URL).respond(json={**FIXTURE, "hits": [hit], "nbHits": 1, "nbPages": 1})
+    (item,) = await _collect(_params())
+    assert isinstance(item, Rejection)
+    assert item.locator == "hn:5"
+
+
+@respx.mock
+async def test_non_web_story_url_falls_back_to_the_discussion() -> None:
+    hit = {"objectID": "7", "created_at_i": 1790000000, "title": "x", "url": "javascript:alert(1)"}
+    respx.get(SEARCH_URL).respond(json={**FIXTURE, "hits": [hit], "nbHits": 1, "nbPages": 1})
+    (item,) = await _collect(_params())
+    assert item.url == "https://news.ycombinator.com/item?id=7"

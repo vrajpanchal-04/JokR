@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from jokr.config import RedditParams
-from jokr.connectors.base import FetchedItem, Rejection
+from jokr.connectors.base import FetchedItem, MalformedResponse, Rejection
 from jokr.guards.redact import Secret
 from jokr.guards.tos import GuardedClient
 
@@ -20,13 +20,12 @@ TOKEN_URL = "https://www.reddit.com/api/v1/access_token"  # noqa: S105 - an endp
 LISTING_URL = "https://oauth.reddit.com/r/{subreddit}/{listing}"
 SITE = "https://www.reddit.com"
 WATERMARK_OVERLAP = timedelta(hours=1)
-# raw keeps only these post fields: no author data, previews or award noise.
+# raw keeps only these post fields: no author data, previews or award noise, and
+# not the title or body, which are already in their own columns.
 _RAW_FIELDS = (
     "id",
     "name",
     "subreddit",
-    "title",
-    "selftext",
     "is_self",
     "url",
     "permalink",
@@ -68,7 +67,11 @@ class RedditConnector:
         )
         if response.status_code != 200:
             raise RedditAuthError(f"token request refused: HTTP {response.status_code}")
-        token = response.json().get("access_token")
+        try:
+            body = response.json()
+        except ValueError:
+            raise RedditAuthError("token response is not JSON") from None
+        token = body.get("access_token") if isinstance(body, dict) else None
         if not isinstance(token, str) or not token:
             raise RedditAuthError("token response had no access_token")
         return Secret(token)
@@ -95,17 +98,49 @@ class RedditConnector:
                 url, params=query, headers={"Authorization": f"Bearer {token.reveal()}"}
             )
             response.raise_for_status()
-            data = response.json().get("data") or {}
+            children, after = _listing(response)
             reached_older = False
-            for child in data.get("children") or []:
+            for child in children:
                 item = _to_item(child, subreddit)
-                if isinstance(item, FetchedItem) and item.posted_at and item.posted_at < start:
-                    reached_older = True
+                too_old = isinstance(item, FetchedItem) and (
+                    item.posted_at is not None and item.posted_at < start
+                )
+                if too_old:
+                    # Pinned posts sit on top whatever their age, so only an
+                    # ordinary post marks the end of the window.
+                    reached_older |= not _stickied(child)
                     continue
                 yield item
-            after = data.get("after")
-            if reached_older or not isinstance(after, str):
+            if reached_older or after is None:
                 return
+        yield Rejection(
+            f"reddit:r/{subreddit}",
+            f"page cap of {self._params.max_pages_per_subreddit} reached before the "
+            "window start; older posts were not read",
+        )
+
+
+def _listing(response: Any) -> tuple[list[Any], str | None]:
+    try:
+        body = response.json()
+    except ValueError:
+        raise MalformedResponse("Reddit listing is not JSON") from None
+    data = body.get("data") if isinstance(body, dict) else None
+    children = data.get("children") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or not isinstance(children, list):
+        raise MalformedResponse("Reddit listing has no data.children list")
+    after = data.get("after")
+    return children, after if isinstance(after, str) and after else None
+
+
+def _stickied(child: Any) -> bool:
+    return bool(isinstance(child, dict) and (child.get("data") or {}).get("stickied"))
+
+
+def _web_url(value: Any) -> str | None:
+    if isinstance(value, str) and value.lower().startswith(("https://", "http://")):
+        return value
+    return None
 
 
 def _to_item(child: Any, subreddit: str) -> FetchedItem | Rejection:
@@ -115,11 +150,19 @@ def _to_item(child: Any, subreddit: str) -> FetchedItem | Rejection:
     name, created = data.get("name"), data.get("created_utc")
     if not isinstance(name, str) or not name.startswith("t3_"):
         return Rejection(f"reddit:r/{subreddit}", "post without a t3_ fullname")
-    if not isinstance(created, int | float):
+    if not isinstance(created, int | float) or isinstance(created, bool):
         return Rejection(f"reddit:{name}", "post without created_utc")
+    sub = data.get("subreddit")
+    if isinstance(sub, str) and sub.lower().startswith("u_"):
+        # A post on someone's profile page: the "subreddit" is their name.
+        return Rejection(f"reddit:{name}", "post on a user profile, not a subreddit")
+    try:
+        posted_at = datetime.fromtimestamp(created, UTC)
+    except (ValueError, OverflowError, OSError):
+        return Rejection(f"reddit:{name}", "created_utc out of range")
     permalink = data.get("permalink")
     discussion = f"{SITE}{permalink}" if isinstance(permalink, str) else None
-    link = data.get("url") if not data.get("is_self") else None
+    link = _web_url(data.get("url")) if not data.get("is_self") else None
     score, comments = data.get("score"), data.get("num_comments")
     author, title, body = data.get("author"), data.get("title"), data.get("selftext")
     return FetchedItem(
@@ -127,10 +170,10 @@ def _to_item(child: Any, subreddit: str) -> FetchedItem | Rejection:
         title=title if isinstance(title, str) else None,
         text=body if isinstance(body, str) else "",
         # Link posts keep their link so the same article dedupes across sources.
-        url=link if isinstance(link, str) and link else discussion,
+        url=link or discussion,
         author=author if isinstance(author, str) and author != "[deleted]" else None,
         points=score if isinstance(score, int) and score >= 0 else None,
         num_comments=comments if isinstance(comments, int) and comments >= 0 else None,
-        posted_at=datetime.fromtimestamp(created, UTC),
+        posted_at=posted_at,
         raw={k: data[k] for k in _RAW_FIELDS if k in data},
     )

@@ -16,7 +16,7 @@ from jokr.connectors.arxiv import (
     FeedError,
     parse_feed,
 )
-from jokr.connectors.base import FetchedItem
+from jokr.connectors.base import FetchedItem, Rejection
 from jokr.guards.tos import GuardedClient
 from tests.guard_helpers import api_source, no_sleep, public_resolver
 
@@ -130,3 +130,50 @@ async def test_next_page_is_requested_when_all_entries_are_in_window() -> None:
     items = await _collect(_params(lookback_days=60))
     assert len(items) == 2
     assert route.calls[1].request.url.params["start"] == "2"
+
+
+# --- review hardening -----------------------------------------------------------
+
+
+def _one_entry(published: str, entry_id: str = "http://arxiv.org/abs/2610.00001v1") -> bytes:
+    entry = (
+        f"<entry><id>{entry_id}</id><published>{published}</published>"
+        "<title>T</title><summary>S</summary></entry>"
+    )
+    return EMPTY.replace(b"</feed>", entry.encode() + b"</feed>")
+
+
+def test_unparseable_date_is_rejected_not_waved_through() -> None:
+    (item,) = parse_feed(_one_entry("not a date"))
+    assert isinstance(item, Rejection)
+    assert "published" in item.reason
+
+
+def test_date_without_timezone_is_read_as_utc() -> None:
+    (item,) = parse_feed(_one_entry("2026-10-03T12:00:00"))
+    assert isinstance(item, FetchedItem)
+    assert item.posted_at == datetime(2026, 10, 3, 12, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "entry_id",
+    ["https://evil.example/arxiv.org/abs/2610.00001", "http://arxiv.org/abs/../../x"],
+)
+def test_entry_id_must_be_a_real_arxiv_id(entry_id: str) -> None:
+    (item,) = parse_feed(_one_entry("2026-10-03T12:00:00Z", entry_id))
+    assert isinstance(item, Rejection)
+
+
+@respx.mock
+async def test_empty_first_page_is_reported() -> None:
+    respx.get(API_URL).respond(content=EMPTY)
+    items = await _collect(_params())
+    assert len(items) == 1
+    assert isinstance(items[0], Rejection)
+    assert "no entries" in items[0].reason
+
+
+def test_raw_keeps_the_contributor_count() -> None:
+    first = parse_feed(FEED)[0]
+    assert isinstance(first, FetchedItem)
+    assert first.raw["n_contributors"] == 2

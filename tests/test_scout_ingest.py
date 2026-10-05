@@ -540,3 +540,10 @@ def test_future_posted_at_is_flagged() -> None:
 
 
 _NOW = datetime(2026, 10, 5, tzinfo=UTC)
+
+
+def test_connector_flags_reach_the_signal_and_odd_names_do_not() -> None:
+    item = _item(flags=frozenset({"encoding_replaced", "Bad Flag!"}))
+    row = prepare(item, source="inbox", salt=SALT, lexicon=LEX)
+    assert "encoding_replaced" in row.flags
+    assert "Bad Flag!" not in row.flags

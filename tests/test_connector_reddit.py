@@ -12,7 +12,7 @@ import pytest
 import respx
 
 from jokr.config import RedditParams
-from jokr.connectors.base import FetchedItem
+from jokr.connectors.base import FetchedItem, MalformedResponse, Rejection
 from jokr.connectors.reddit import LISTING_URL, TOKEN_URL, RedditAuthError, RedditConnector
 from jokr.guards.redact import Secret
 from jokr.guards.tos import GuardedClient, UpstreamUnavailable
@@ -147,3 +147,90 @@ async def test_children_that_are_not_posts_are_rejected() -> None:
     items = await _collect()
     assert len(items) == 2
     assert not any(isinstance(i, FetchedItem) for i in items)
+
+
+# --- review hardening: nothing is lost or admitted without a trace ----------------
+
+
+@pytest.mark.parametrize(
+    "body", [["not", "a", "listing"], {"data": "x"}, {"data": {"after": None}}]
+)
+@respx.mock
+async def test_malformed_listing_fails_loudly(body: Any) -> None:
+    _token_ok()
+    respx.get(SAAS_NEW).respond(json=body)
+    with pytest.raises(MalformedResponse):
+        await _collect()
+
+
+@respx.mock
+async def test_token_body_that_is_not_json_is_an_auth_error() -> None:
+    respx.post(TOKEN_URL).respond(200, content=b"<html>")
+    with pytest.raises(RedditAuthError):
+        await _collect()
+
+
+@respx.mock
+async def test_page_cap_is_reported_when_the_window_is_not_reached() -> None:
+    _token_ok()
+    respx.get(SAAS_NEW).respond(json=LISTING)
+    items = await _collect(_params(max_pages_per_subreddit=1, lookback_days=30))
+    assert any(isinstance(i, Rejection) and "page cap" in i.reason for i in items)
+
+
+@respx.mock
+async def test_old_stickied_post_does_not_stop_paging() -> None:
+    _token_ok()
+    page = json.loads(json.dumps(LISTING))
+    sticky = page["data"]["children"][0]["data"]
+    sticky["stickied"] = True
+    sticky["created_utc"] = (NOW - timedelta(days=300)).timestamp()
+    route = respx.get(SAAS_NEW).mock(
+        side_effect=[httpx.Response(200, json=page), httpx.Response(200, json=EMPTY)]
+    )
+    await _collect(_params(lookback_days=30))
+    assert route.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"subreddit": "u_someone"}, "profile"),
+        ({"created_utc": float("nan")}, "created_utc"),
+        ({"created_utc": 1e20}, "created_utc"),
+    ],
+)
+@respx.mock
+async def test_bad_posts_become_rejections(change: dict[str, Any], reason: str) -> None:
+    _token_ok()
+    page = json.loads(json.dumps(EMPTY))
+    post = json.loads(json.dumps(LISTING["data"]["children"][0]))
+    post["data"].update(change)
+    page["data"]["children"] = [post]
+    # respx's json= refuses NaN; json.dumps writes it, and the connector's reader accepts it.
+    respx.get(SAAS_NEW).respond(
+        content=json.dumps(page).encode(), headers={"content-type": "application/json"}
+    )
+    (item,) = await _collect()
+    assert isinstance(item, Rejection)
+    assert reason in item.reason
+
+
+@respx.mock
+async def test_non_web_link_falls_back_to_the_discussion() -> None:
+    _token_ok()
+    page = json.loads(json.dumps(EMPTY))
+    post = json.loads(json.dumps(LISTING["data"]["children"][1]))
+    post["data"]["url"] = "javascript:alert(1)"
+    page["data"]["children"] = [post]
+    respx.get(SAAS_NEW).respond(json=page)
+    (item,) = await _collect(_params(lookback_days=30))
+    assert item.url == "https://www.reddit.com/r/SaaS/comments/fx0002/show/"
+
+
+@respx.mock
+async def test_raw_does_not_duplicate_title_or_body() -> None:
+    _token_ok()
+    respx.get(SAAS_NEW).respond(json={**LISTING, "data": {**LISTING["data"], "after": None}})
+    items = await _collect()
+    assert "selftext" not in items[0].raw and "title" not in items[0].raw

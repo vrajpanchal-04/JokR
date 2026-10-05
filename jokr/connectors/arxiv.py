@@ -28,7 +28,10 @@ MAX_ELEMENTS = 50_000
 
 _ATOM = "{http://www.w3.org/2005/Atom}"
 _ARXIV = "{http://arxiv.org/schemas/atom}"
-_ID = re.compile(r"arxiv\.org/abs/(?P<id>[^\s?#]+?)(?:v\d+)?$")
+# New ids (2610.01234) and old ones (hep-th/9901001), with the version dropped.
+_ID = re.compile(
+    r"^https?://arxiv\.org/abs/(?P<id>\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?$"
+)
 _SPACE = re.compile(r"\s+")
 
 
@@ -42,9 +45,11 @@ def _squash(text: str | None) -> str:
 
 def _when(text: str | None) -> datetime | None:
     try:
-        return datetime.fromisoformat(text.strip()) if text else None
+        when = datetime.fromisoformat(text.strip()) if text else None
     except ValueError:
         return None
+    # The feed always carries a zone; if one ever doesn't, it is UTC, not local time.
+    return when.replace(tzinfo=UTC) if when and when.tzinfo is None else when
 
 
 def _entry(elem: Any) -> FetchedItem | Rejection:
@@ -52,6 +57,10 @@ def _entry(elem: Any) -> FetchedItem | Rejection:
     if match is None:
         return Rejection("arxiv:?", "entry without an arXiv id")
     arxiv_id = match.group("id")
+    posted_at = _when(elem.findtext(f"{_ATOM}published"))
+    if posted_at is None:
+        # Without a date the window check can't run, so the entry is not let through.
+        return Rejection(f"arxiv:{arxiv_id}", "missing or unparseable published date")
     names = [_squash(a.findtext(f"{_ATOM}name")) for a in elem.findall(f"{_ATOM}author")]
     primary = elem.find(f"{_ARXIV}primary_category")
     return FetchedItem(
@@ -60,7 +69,7 @@ def _entry(elem: Any) -> FetchedItem | Rejection:
         text=_squash(elem.findtext(f"{_ATOM}summary")),
         url=ABS_URL.format(arxiv_id),
         author=next((n for n in names if n), None),
-        posted_at=_when(elem.findtext(f"{_ATOM}published")),
+        posted_at=posted_at,
         # Built field by field, so no author name ever reaches raw.
         raw={
             "id": arxiv_id,
@@ -68,7 +77,7 @@ def _entry(elem: Any) -> FetchedItem | Rejection:
             "updated": elem.findtext(f"{_ATOM}updated"),
             "primary_category": primary.get("term") if primary is not None else None,
             "categories": [c.get("term") for c in elem.findall(f"{_ATOM}category")],
-            "n_authors": len(names),
+            "n_contributors": len(names),
         },
     )
 
@@ -126,9 +135,16 @@ class ArxivConnector:
             )
             response.raise_for_status()
             entries = parse_feed(response.content)
+            if not entries and offset == 0:
+                yield Rejection("arxiv", "feed returned no entries for these categories")
+                return
             reached_older = False
             for item in entries:
-                if isinstance(item, FetchedItem) and item.posted_at and item.posted_at < start:
+                if (
+                    isinstance(item, FetchedItem)
+                    and item.posted_at is not None
+                    and (item.posted_at < start)
+                ):
                     reached_older = True
                     continue
                 yield item

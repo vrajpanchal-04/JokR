@@ -171,5 +171,64 @@ def test_inbox_row_is_strict() -> None:
     assert InboxRow.model_validate({"text": "ok", "points": "3"}).points == 3
 
 
-async def test_missing_inbox_dir_yields_nothing(tmp_path: Path) -> None:
-    assert await _collect(tmp_path / "missing") == []
+# --- review hardening: unreadable or odd files are reported, never fatal ---------
+
+
+async def test_missing_inbox_dir_is_reported(tmp_path: Path) -> None:
+    (rejection,) = _rejections(await _collect(tmp_path / "missing"))
+    assert rejection.locator == "inbox"
+    assert "not found" in rejection.reason
+
+
+async def test_unreadable_file_is_a_rejection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a.txt").write_text("fine")
+    (tmp_path / "b.txt").write_text("locked")
+    real_open = os.open
+
+    def deny(path: Any, flags: int, *args: Any) -> int:
+        if str(path).endswith("b.txt"):
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(os, "open", deny)
+    results = await _collect(tmp_path)
+    assert [i.title for i in _items(results)] == ["a.txt"]
+    (rejection,) = _rejections(results)
+    assert rejection.locator == "b.txt"
+    assert "unreadable" in rejection.reason
+
+
+async def test_file_swapped_for_a_symlink_is_not_followed(tmp_path: Path) -> None:
+    secret = tmp_path.parent / f"{tmp_path.name}-secret.txt"
+    secret.write_text("outside")
+    (tmp_path / "a.txt").symlink_to(secret)
+    results = await _collect(tmp_path)
+    assert _items(results) == []
+
+
+async def test_file_that_grew_past_the_cap_is_rejected(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("x" * 50)
+    results = await _collect(tmp_path, max_file_bytes=10)
+    (rejection,) = _rejections(results)
+    assert "over 10" in rejection.reason
+
+
+async def test_replaced_bytes_and_truncation_are_flagged(tmp_path: Path) -> None:
+    (tmp_path / "bad.txt").write_bytes(b"caf\xe9 pain")
+    (tmp_path / "long.md").write_text("# Long\n" + "x" * (40 * 1024))
+    by_title = {i.title: i for i in _items(await _collect(tmp_path))}
+    assert "encoding_replaced" in by_title["bad.txt"].flags
+    assert "truncated" in by_title["Long"].flags
+
+
+def test_reader_refuses_a_symlink_even_if_the_walk_missed_it(tmp_path: Path) -> None:
+    from jokr.connectors.inbox import _read_regular_file
+
+    target = tmp_path / "real.txt"
+    target.write_text("x")
+    link = tmp_path / "link.txt"
+    link.symlink_to(target)
+    with pytest.raises(OSError):
+        _read_regular_file(link, 100)
