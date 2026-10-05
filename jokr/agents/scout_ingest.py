@@ -11,9 +11,9 @@ import hmac
 import json
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit
@@ -37,9 +37,16 @@ class IngestRejected(ValueError):
 
 # --- cleaning -------------------------------------------------------------------
 
-# Invisible characters that can hide or reorder text: bidi controls, zero-width
-# characters, the BOM, and Unicode tag characters (used to smuggle hidden prompts).
-_HIDDEN = re.compile("[؜​-‏‪-‮⁠-⁤⁦-⁩﻿\U000e0000-\U000e007f]")
+# Characters that can hide or reorder text. Rather than a hand-kept list, drop
+# whole categories: format (bidi controls, zero-width, tags, soft hyphen),
+# private-use, surrogates and unassigned. Plus the visible-but-blank fillers and
+# variation selectors that are used to smuggle text past a reader.
+_HIDDEN_CATEGORIES = frozenset({"Cf", "Co", "Cs", "Cn"})
+_HIDDEN_EXTRA = re.compile(
+    "[\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u3164\ufe00-\ufe0f\uffa0\U000e0100-\U000e01ef]"
+)
+# Line and paragraph separators become plain newlines.
+_SEPARATORS = re.compile("[\u2028\u2029]")
 # C0 controls except tab and newline, DEL, and C1 controls.
 _CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
@@ -58,48 +65,74 @@ def _cap_bytes(text: str, limit: int) -> str:
     return data[:limit].decode(errors="ignore")
 
 
+def _strip_hidden(text: str) -> str:
+    text = _HIDDEN_EXTRA.sub("", text)
+    if text.isascii():
+        return text
+    return "".join(c for c in text if unicodedata.category(c) not in _HIDDEN_CATEGORIES)
+
+
 def clean_text(text: str, limit: int = MAX_TEXT_BYTES) -> Cleaned:
     flags: set[str] = set()
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    if _HIDDEN.search(text):
-        flags.add("hidden_unicode")
-        text = _HIDDEN.sub("", text)
     text = _CONTROL.sub("", text)
-    text = unicodedata.normalize("NFC", text)
-    capped = _cap_bytes(text, limit)
-    if capped != text:
+    separated = _SEPARATORS.sub("\n", text)
+    # NFKC folds fullwidth and other look-alike forms, so a fullwidth "ignore" or
+    # "@" is flagged and scrubbed like its plain form. Stripping runs again after
+    # folding because folding can turn one filler into another.
+    folded = _strip_hidden(unicodedata.normalize("NFKC", _strip_hidden(separated)))
+    if separated != text or len(folded) < len(unicodedata.normalize("NFKC", separated)):
+        flags.add("hidden_unicode")
+    capped = _cap_bytes(folded, limit)
+    if capped != folded:
         flags.add("truncated")
     return Cleaned(capped, frozenset(flags))
 
 
 # --- flags ----------------------------------------------------------------------
 
+# Every pattern here is linear: no nested or adjacent unbounded repeats that can
+# backtrack, and character classes are bounded where a run could be long.
 _FLAG_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "instruction_like",
         re.compile(
-            r"\b(ignore|disregard|forget|override)\s+(all\s+|any\s+|the\s+)?"
-            r"(previous|prior|above|earlier|preceding)\b"
-            r"|\byou\s+are\s+now\b"
-            r"|\b(system|developer)\s+prompt\b"
-            r"|\bnew\s+instructions\s*:",
+            r"\b(?:ignore|disregard|forget|override)[ \t]+"
+            r"(?:(?:all|any|the|your|my|of|every|everything|these|those|its)[ \t]+){0,3}"
+            r"(?:previous|prior|above|earlier|preceding|instructions|rules|guidelines)\b"
+            r"|\byou[ \t]+are[ \t]+now\b"
+            r"|\b(?:system|developer)[ \t]+prompt\b"
+            r"|\bnew[ \t]+instructions[ \t]*:",
             re.IGNORECASE,
         ),
     ),
     (
         "role_marker",
         re.compile(
-            r"(^|\n)\s*(system|assistant|user|developer)\s*:"
-            r"|<\|im_(start|end)\|>|\[/?INST\]|</?(system|assistant)>|^#+\s*system\b",
+            r"^[ \t]*(?:system|assistant|user|developer)[ \t]*:"
+            r"|<\|im_(?:start|end)\|>|\[/?INST\]|</?(?:system|assistant)>|^#+[ \t]*system\b",
             re.IGNORECASE | re.MULTILINE,
         ),
     ),
     (
         "tool_call_json",
-        re.compile(r"\"(tool|tool_calls|function_call|tool_use)\"\s*:", re.IGNORECASE),
+        re.compile(r"[\"'](?:tool|tool_calls|function_call|tool_use)[\"'][ \t]*:", re.IGNORECASE),
     ),
-    ("markdown_image", re.compile(r"!\[[^\]]*\]\([^)]*\)")),
-    ("markdown_link", re.compile(r"(?<!!)\[[^\]]+\]\(\s*[a-z][a-z0-9+.-]*:[^)]*\)", re.I)),
+    (
+        "html_active",
+        re.compile(
+            r"<[ \t]*/?[ \t]*(?:script|iframe|object|embed|svg|img|style|link|meta|form|base)\b"
+            r"|\bon[a-z]{3,20}[ \t]*=[ \t]*[\"']",
+            re.IGNORECASE,
+        ),
+    ),
+    ("markdown_image", re.compile(r"!\[[^\]\n]{0,500}\]\([^)\n]{0,2000}\)")),
+    (
+        "markdown_link",
+        re.compile(
+            r"(?<!!)\[[^\]\n]{1,500}\]\([ \t]*[a-z][a-z0-9+.-]{0,20}:[^)\n]{0,2000}\)", re.I
+        ),
+    ),
 )
 
 
@@ -114,7 +147,8 @@ USER = "[user]"
 EMAIL = "[email]"
 _NAME = r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,38}"
 # A host must start a URL or a word, so "dropbox.com" never matches "x.com".
-_HOST_START = r"(?<![\w.-])(?:www\.|m\.|old\.|mobile\.)?"
+# Any subdomain may come first: uk.linkedin.com, np.reddit.com, old.reddit.com.
+_HOST_START = r"(?<![\w.-])(?:[a-z0-9-]{1,63}\.){0,3}"
 _IDENTITY: tuple[tuple[re.Pattern[str], str], ...] = (
     # Profile links. Only the name is replaced; the rest of the link stays readable.
     (re.compile(_HOST_START + rf"((?:twitter|x)\.com/){_NAME}", re.I), rf"\1{USER}"),
@@ -124,24 +158,46 @@ _IDENTITY: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(_HOST_START + rf"((?:instagram|facebook|fb)\.com/){_NAME}", re.I),
         rf"\1{USER}",
     ),
+    (re.compile(_HOST_START + rf"(bsky\.app/profile/){_NAME}", re.I), rf"\1{USER}"),
+    (re.compile(_HOST_START + rf"(t\.me/){_NAME}", re.I), rf"\1{USER}"),
+    (re.compile(_HOST_START + rf"(nitter\.[a-z.]{{2,30}}/){_NAME}", re.I), rf"\1{USER}"),
+    (
+        re.compile(_HOST_START + rf"(youtube\.com/(?:c|user|channel)/){_NAME}", re.I),
+        rf"\1{USER}",
+    ),
     # GitHub/GitLab: a bare /name is a profile; /org/repo/... is a project and stays.
     (
         re.compile(
-            _HOST_START + r"((?:github|gitlab)\.com/)[A-Za-z0-9-]{1,39}(?=/?(?:[\s?#)\]>\"']|$))",
+            _HOST_START
+            + r"((?:github|gitlab)\.com/)[A-Za-z0-9-]{1,39}(?=/?(?:[\s?#)\]>\"',.;:!]|$))",
             re.I,
         ),
         rf"\1{USER}",
     ),
-    (re.compile(r"(news\.ycombinator\.com/user\?id=)[A-Za-z0-9_-]+", re.I), rf"\1{USER}"),
+    (
+        re.compile(
+            r"(news\.ycombinator\.com/(?:user|threads|submitted|favorites)\?id=)[A-Za-z0-9_-]+",
+            re.I,
+        ),
+        rf"\1{USER}",
+    ),
     # /@name on any site: Mastodon, Threads, TikTok, YouTube, Medium.
     (re.compile(r"(?<=/)@[A-Za-z0-9_.]{1,30}"), f"@{USER}"),
-    (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"), EMAIL),
+    # The lookbehind starts a match only at the start of a run, and the possessive
+    # local part never backtracks, so a long run without "@" stays linear.
+    (
+        re.compile(
+            r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]++@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"
+        ),
+        EMAIL,
+    ),
     # Reddit-style u/name and /user/name in prose.
     (re.compile(r"(?<![\w/])/?u/[A-Za-z0-9_-]{3,20}"), f"u/{USER}"),
     (re.compile(r"(?<![\w])/user/[A-Za-z0-9_-]{3,20}"), f"/user/{USER}"),
     # @handle, but not "python@3.12", "a @ b" or the placeholder itself.
     (re.compile(r"(?<![\w@./+-])@[A-Za-z_][A-Za-z0-9_.]{1,30}"), f"@{USER}"),
 )
+MIN_NAME_CHARS = 3  # shorter author names ("ab", "pg") are too often ordinary words
 
 
 @dataclass(frozen=True)
@@ -150,31 +206,48 @@ class Scrubbed:
     changed: bool
 
 
-def scrub_identity(text: str) -> Scrubbed:
-    """Replace handles, emails and profile links. Authors are hashed; nobody else is stored."""
+def _name_pattern(names: Sequence[str]) -> re.Pattern[str] | None:
+    usable = sorted({n for n in names if len(n) >= MIN_NAME_CHARS}, key=len, reverse=True)
+    if not usable:
+        return None
+    return re.compile(r"(?<![\w])(?:" + "|".join(re.escape(n) for n in usable) + r")(?![\w])", re.I)
+
+
+def scrub_identity(text: str, names: Sequence[str] = ()) -> Scrubbed:
+    """Replace handles, emails, profile links and the given author names.
+
+    Authors are hashed, and nobody else is stored: a name quoted in a reply
+    ("thanks, patio11") is as identifying as the author field itself.
+    """
     out = text
     for pattern, replacement in _IDENTITY:
         out = pattern.sub(replacement, out)
+    named = _name_pattern(names)
+    if named is not None:
+        out = named.sub(USER, out)
     return Scrubbed(out, out != text)
 
 
-def _scrub_strings(value: Any, depth: int = 0) -> tuple[Any, bool]:
-    if depth > _RAW_DEPTH:
-        return None, True
+MAX_RAW_STRING_BYTES = 64 * 1024
+
+
+def _clean_raw(value: Any, names: Sequence[str], flags: set[str]) -> Any:
+    """Clean, flag and scrub every string in raw, the same as the text columns.
+
+    `_safe_raw` has already bounded the depth, so this recursion is bounded too.
+    """
     if isinstance(value, str):
-        scrubbed = scrub_identity(value)
-        return scrubbed.text, scrubbed.changed
+        cleaned = clean_text(value, limit=MAX_RAW_STRING_BYTES)
+        flags |= cleaned.flags | scan_flags(cleaned.text)
+        scrubbed = scrub_identity(cleaned.text, names)
+        if scrubbed.changed:
+            flags.add("identity_scrubbed")
+        return scrubbed.text
     if isinstance(value, dict):
-        changed = False
-        result: dict[str, Any] = {}
-        for k, v in value.items():
-            result[k], c = _scrub_strings(v, depth + 1)
-            changed |= c
-        return result, changed
+        return {k: _clean_raw(v, names, flags) for k, v in value.items()}
     if isinstance(value, list):
-        pairs = [_scrub_strings(v, depth + 1) for v in value]
-        return [v for v, _ in pairs], any(c for _, c in pairs)
-    return value, False
+        return [_clean_raw(v, names, flags) for v in value]
+    return value
 
 
 # --- hashing --------------------------------------------------------------------
@@ -190,15 +263,18 @@ def content_hash(title: str | None, text: str) -> str:
     return hashlib.sha256(normalized.encode()).hexdigest()
 
 
+# Matched anywhere in the key, any casing or separator: authorName, user_id, screen-name.
 _AUTHOR_KEY = re.compile(
-    r"^(author|authors|author_.*|by|user|users|username|user_name|submitted_by|"
-    r"created_by|owner|email|e_mail|maker|makers|hunter)$",
+    r"author|user|owner|creator|screen[_-]?name|handle|e[_-]?mail|nick|login|maker|hunter"
+    r"|submitted[_-]?by|created[_-]?by|^by$",
     re.IGNORECASE,
 )
+# List values like HN's "_tags": ["story", "author_pg"] carry names too.
+_AUTHOR_VALUE = re.compile(r"^author_", re.IGNORECASE)
 
 
 def strip_author_fields(raw: Mapping[str, Any]) -> dict[str, Any]:
-    """A copy of `raw` without author-identifying keys, at any depth."""
+    """A copy of `raw` without author-identifying keys or tag values, at any depth."""
 
     def walk(value: Any, depth: int) -> Any:
         if depth > _RAW_DEPTH:
@@ -207,14 +283,31 @@ def strip_author_fields(raw: Mapping[str, Any]) -> dict[str, Any]:
             return {
                 str(k): walk(v, depth + 1)
                 for k, v in value.items()
-                if not _AUTHOR_KEY.match(str(k))
+                if not _AUTHOR_KEY.search(str(k))
             }
         if isinstance(value, list | tuple):
-            return [walk(v, depth + 1) for v in value]
+            return [
+                walk(v, depth + 1)
+                for v in value
+                if not (isinstance(v, str) and _AUTHOR_VALUE.match(v))
+            ]
         return value
 
     result: dict[str, Any] = walk(raw, 0)
     return result
+
+
+def _too_deep(value: Any, limit: int) -> bool:
+    stack = [(value, 0)]
+    while stack:
+        node, depth = stack.pop()
+        if depth > limit:
+            return True
+        if isinstance(node, Mapping):
+            stack.extend((v, depth + 1) for v in node.values())
+        elif isinstance(node, list | tuple):
+            stack.extend((v, depth + 1) for v in node)
+    return False
 
 
 # --- URL canonicalization -------------------------------------------------------
@@ -271,38 +364,60 @@ class SignalRow:
     intent_version: str
 
 
+FUTURE_SLACK = timedelta(days=1)
+
+
 def _checked_ids(item: FetchedItem) -> None:
     if not 1 <= len(item.external_id) <= MAX_EXTERNAL_ID_CHARS:
         raise IngestRejected(f"external_id must be 1-{MAX_EXTERNAL_ID_CHARS} characters")
     if item.url is not None and len(item.url) > MAX_URL_CHARS:
         raise IngestRejected(f"url over {MAX_URL_CHARS} characters")
+    if item.url and not item.url.lower().startswith(("http://", "https://")):
+        raise IngestRejected("url must be http:// or https://")
     if not item.url and not item.locator:
         raise IngestRejected("needs a url or locator")
+    if item.posted_at is not None and item.posted_at.utcoffset() is None:
+        raise IngestRejected("posted_at has no timezone")
     for name in ("points", "num_comments"):
         value = getattr(item, name)
         if value is not None and value < 0:
             raise IngestRejected(f"{name} is negative")
 
 
-def _safe_raw(raw: Mapping[str, Any]) -> tuple[dict[str, Any], set[str]]:
+def _safe_raw(raw: Mapping[str, Any], names: Sequence[str]) -> tuple[dict[str, Any], set[str]]:
+    if _too_deep(raw, _RAW_DEPTH):
+        return {"_omitted": f"raw nested deeper than {_RAW_DEPTH}"}, {"raw_truncated"}
     stripped = strip_author_fields(raw)
     size = len(json.dumps(stripped, default=str, ensure_ascii=False).encode())
     if size > MAX_RAW_BYTES:
         return {"_omitted": "raw over 512 KB"}, {"raw_omitted"}
-    scrubbed, changed = _scrub_strings(stripped)
-    return scrubbed, {"identity_scrubbed"} if changed else set()
+    flags: set[str] = set()
+    cleaned: dict[str, Any] = _clean_raw(stripped, names, flags)
+    return cleaned, flags
 
 
-def prepare(item: FetchedItem, *, source: str, salt: bytes, lexicon: IntentLexicon) -> SignalRow:
+def _scrubbed_or_none(value: str | None, names: Sequence[str]) -> str | None:
+    return scrub_identity(value, names).text if value is not None else None
+
+
+def prepare(
+    item: FetchedItem,
+    *,
+    source: str,
+    salt: bytes,
+    lexicon: IntentLexicon,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> SignalRow:
     """Clean, flag, hash and score one item, or raise IngestRejected."""
     if len(salt) < MIN_SALT_BYTES:
         raise ValueError(f"author salt must be at least {MIN_SALT_BYTES} bytes")
     _checked_ids(item)
+    names = (item.author,) if item.author else ()
 
     body = clean_text(item.text)
     title = clean_text(item.title, limit=4 * MAX_TITLE_CHARS) if item.title is not None else None
-    body_text = scrub_identity(body.text)
-    title_scrub = scrub_identity(title.text[:MAX_TITLE_CHARS]) if title else None
+    body_text = scrub_identity(body.text, names)
+    title_scrub = scrub_identity(title.text[:MAX_TITLE_CHARS], names) if title else None
     title_text = title_scrub.text if title_scrub else None
     if not body_text.text.strip() and not title_text:
         raise IngestRejected("empty after cleaning")
@@ -314,15 +429,21 @@ def prepare(item: FetchedItem, *, source: str, salt: bytes, lexicon: IntentLexic
         flags.add("identity_scrubbed")
     combined = f"{title_text or ''}\n{body_text.text}"
     flags |= scan_flags(combined)
-    raw, raw_flags = _safe_raw(item.raw)
+    raw, raw_flags = _safe_raw(item.raw, names)
     flags |= raw_flags
+    if item.posted_at is not None and item.posted_at > now() + FUTURE_SLACK:
+        flags.add("posted_in_future")
+    url = _scrubbed_or_none(item.url, names)
+    url_canonical = canonical_url(url)
+    if url and url_canonical is None:
+        flags.add("url_not_canonical")  # stored, but it won't dedupe across sources
     intent = score_intent(combined, lexicon)
 
     return SignalRow(
         external_id=item.external_id,
-        url=item.url,
-        url_canonical=canonical_url(item.url),
-        locator=item.locator,
+        url=url,
+        url_canonical=url_canonical,
+        locator=_scrubbed_or_none(item.locator, names),
         title=title_text,
         text=body_text.text,
         author_hash=author_hash(salt, source, item.author) if item.author else None,
