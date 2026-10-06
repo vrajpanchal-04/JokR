@@ -330,6 +330,10 @@ def _granted() -> None:
             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{SCOUT_ROLE}') THEN
                 CREATE ROLE {SCOUT_ROLE} NOLOGIN;
             END IF;
+        -- Roles are cluster-wide: two databases migrating at once can both pass
+        -- the check above, and the second CREATE then finds the role made.
+        EXCEPTION WHEN duplicate_object OR unique_violation THEN
+            NULL;
         END
         $$
         """
