@@ -6,7 +6,7 @@ from pydantic import ValidationError
 from jokr.settings import ScoutSettings, Settings
 
 DB = "postgresql+psycopg://jokr_scout:x@db:5432/jokr"
-SALT = "s" * 32
+SALT = "fixture-salt-0123456789abcdefghijKLMNOP"
 
 
 def _scout(**overrides: object) -> ScoutSettings:
@@ -72,3 +72,11 @@ def test_blank_proxy_settings_mean_no_proxy() -> None:
     s = _scout(scout_https_proxy="", scout_ca_bundle=" ")
     assert s.scout_https_proxy is None
     assert s.scout_ca_bundle is None
+
+
+@pytest.mark.parametrize(
+    "salt", ["replace-with-48-random-url-safe-characters-xxxxxxxxxx", "a" * 40, "ab" * 20]
+)
+def test_placeholder_or_guessable_salts_are_refused(salt: str) -> None:
+    with pytest.raises(ValidationError, match="placeholder"):
+        _scout(author_hash_salt=salt)

@@ -27,27 +27,23 @@ _TOP = text(
     """
 )
 # Days are counted in UTC so the answer does not depend on the server timezone.
+# Each branch filters with HAVING, so only recurring groups reach the final sort.
+_DAY = "(COALESCE(posted_at, fetched_at) AT TIME ZONE 'UTC')::date"
 _RECURRING = text(
-    """
-    WITH d AS (
-        SELECT s.content_hash, s.url_canonical, s.source_id, s.title,
-               (COALESCE(s.posted_at, s.fetched_at) AT TIME ZONE 'UTC')::date AS day
-        FROM signals s
-    ), g AS (
-        SELECT 'content' AS kind, content_hash AS key, min(title) AS sample_title,
-               count(DISTINCT day) AS days, count(DISTINCT source_id) AS sources,
-               count(*) AS signals
-        FROM d GROUP BY content_hash
-        UNION ALL
-        SELECT 'url', url_canonical, min(title),
-               count(DISTINCT day), count(DISTINCT source_id), count(*)
-        FROM d WHERE url_canonical IS NOT NULL GROUP BY url_canonical
-    )
-    SELECT kind, key, sample_title, days, sources, signals FROM g
-    WHERE days > 1 OR sources > 1
+    f"""
+    SELECT 'content' AS kind, content_hash AS key, min(title) AS sample_title,
+           count(DISTINCT {_DAY}) AS days, count(DISTINCT source_id) AS sources,
+           count(*) AS signals
+    FROM signals GROUP BY content_hash
+    HAVING count(DISTINCT {_DAY}) > 1 OR count(DISTINCT source_id) > 1
+    UNION ALL
+    SELECT 'url', url_canonical, min(title),
+           count(DISTINCT {_DAY}), count(DISTINCT source_id), count(*)
+    FROM signals WHERE url_canonical IS NOT NULL GROUP BY url_canonical
+    HAVING count(DISTINCT {_DAY}) > 1 OR count(DISTINCT source_id) > 1
     ORDER BY days DESC, sources DESC, signals DESC, key
     LIMIT :n
-    """
+    """  # noqa: S608 - _DAY is a constant, not input
 )
 
 

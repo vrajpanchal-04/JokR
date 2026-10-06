@@ -9,6 +9,7 @@ Nothing here trusts the text; `trust` stays 'untrusted' in the database.
 import hashlib
 import hmac
 import json
+import math
 import re
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
@@ -16,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
 from jokr.agents.intent import score_intent
 from jokr.config import IntentLexicon
@@ -97,12 +98,12 @@ _FLAG_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "instruction_like",
         re.compile(
-            r"\b(?:ignore|disregard|forget|override)[ \t]+"
-            r"(?:(?:all|any|the|your|my|of|every|everything|these|those|its)[ \t]+){0,3}"
+            r"\b(?:ignore|disregard|forget|override)\s{1,20}"
+            r"(?:(?:all|any|the|your|my|of|every|everything|these|those|its)\s{1,20}){0,3}"
             r"(?:previous|prior|above|earlier|preceding|instructions|rules|guidelines)\b"
-            r"|\byou[ \t]+are[ \t]+now\b"
-            r"|\b(?:system|developer)[ \t]+prompt\b"
-            r"|\bnew[ \t]+instructions[ \t]*:",
+            r"|\byou\s{1,20}are\s{1,20}now\b"
+            r"|\b(?:system|developer)\s{1,20}prompt\b"
+            r"|\bnew\s{1,20}instructions[ \t]{0,20}:",
             re.IGNORECASE,
         ),
     ),
@@ -121,8 +122,8 @@ _FLAG_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "html_active",
         re.compile(
-            r"<[ \t]*/?[ \t]*(?:script|iframe|object|embed|svg|img|style|link|meta|form|base)\b"
-            r"|\bon[a-z]{3,20}[ \t]*=[ \t]*[\"']",
+            r"<[ \t]{0,20}/?[ \t]{0,20}(?:script|iframe|object|embed|svg|img|style|link|meta|form"
+            r"|base)\b|\bon[a-z]{3,20}[ \t]{0,20}=[ \t]{0,20}[\"']",
             re.IGNORECASE,
         ),
     ),
@@ -179,6 +180,11 @@ _IDENTITY: tuple[tuple[re.Pattern[str], str], ...] = (
             r"(news\.ycombinator\.com/(?:user|threads|submitted|favorites)\?id=)[A-Za-z0-9_-]+",
             re.I,
         ),
+        rf"\1{USER}",
+    ),
+    # Names passed as query parameters: twitter.com/intent/user?screen_name=bob.
+    (
+        re.compile(r"([?&](?:screen_name|user_?name|handle)=)[^&#\s]{1,64}", re.I),
         rf"\1{USER}",
     ),
     # /@name on any site: Mastodon, Threads, TikTok, YouTube, Medium.
@@ -244,9 +250,13 @@ def _clean_raw(value: Any, names: Sequence[str], flags: set[str]) -> Any:
             flags.add("identity_scrubbed")
         return scrubbed.text
     if isinstance(value, dict):
-        return {k: _clean_raw(v, names, flags) for k, v in value.items()}
+        return {clean_text(k).text: _clean_raw(v, names, flags) for k, v in value.items()}
     if isinstance(value, list):
         return [_clean_raw(v, names, flags) for v in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        # jsonb has no NaN or Infinity; one would fail the whole insert batch.
+        flags.add("raw_value_dropped")
+        return None
     return value
 
 
@@ -365,6 +375,7 @@ class SignalRow:
 
 
 FUTURE_SLACK = timedelta(days=1)
+MAX_COUNT = 2**31 - 1  # the points and num_comments columns are int4
 _FLAG_NAME = re.compile(r"[a-z_]{1,40}")
 
 
@@ -381,8 +392,14 @@ def _checked_ids(item: FetchedItem) -> None:
         raise IngestRejected("posted_at has no timezone")
     for name in ("points", "num_comments"):
         value = getattr(item, name)
-        if value is not None and value < 0:
-            raise IngestRejected(f"{name} is negative")
+        if value is not None and not 0 <= value <= MAX_COUNT:
+            raise IngestRejected(f"{name} must be 0-{MAX_COUNT}")
+    for name in ("external_id", "url", "locator"):
+        value = getattr(item, name)
+        # Ids and links are stored as given, so they must already be clean: no
+        # NUL (Postgres refuses it), lone surrogates, or hidden characters.
+        if value is not None and clean_text(value).text != value:
+            raise IngestRejected(f"{name} has control or hidden characters")
 
 
 def _safe_raw(raw: Mapping[str, Any], names: Sequence[str]) -> tuple[dict[str, Any], set[str]]:
@@ -397,8 +414,42 @@ def _safe_raw(raw: Mapping[str, Any], names: Sequence[str]) -> tuple[dict[str, A
     return cleaned, flags
 
 
-def _scrubbed_or_none(value: str | None, names: Sequence[str]) -> str | None:
-    return scrub_identity(value, names).text if value is not None else None
+@dataclass(frozen=True)
+class _Texts:
+    title: str | None
+    text: str
+    flags: frozenset[str]
+
+
+def _clean_title_and_text(item: FetchedItem, names: Sequence[str]) -> _Texts:
+    body = clean_text(item.text)
+    title = clean_text(item.title, limit=4 * MAX_TITLE_CHARS) if item.title is not None else None
+    body_text = scrub_identity(body.text, names)
+    title_scrub = scrub_identity(title.text[:MAX_TITLE_CHARS], names) if title else None
+    flags = set(body.flags) | (set(title.flags) if title else set())
+    if title and len(title.text) > MAX_TITLE_CHARS:
+        flags.add("truncated")
+    if body_text.changed or (title_scrub and title_scrub.changed):
+        flags.add("identity_scrubbed")
+    return _Texts(title_scrub.text if title_scrub else None, body_text.text, frozenset(flags))
+
+
+def _clean_link(url: str | None) -> tuple[str | None, str | None, set[str]]:
+    """The stored URL and its dedupe key.
+
+    Only the structural patterns apply here, not the author's name: a commenter
+    called "python" must not turn python.org into [user].org. A link that is
+    itself a profile is scrubbed and gets no dedupe key, so two different
+    people's profiles never count as the same page.
+    """
+    if url is None:
+        return None, None, set()
+    # Percent-encoding (twitter.com/%62ob) would hide a name from the patterns.
+    scrubbed = scrub_identity(unquote(url))
+    if scrubbed.changed:
+        return scrubbed.text, None, {"identity_scrubbed", "url_not_canonical"}
+    key = canonical_url(url)
+    return url, key, set() if key else {"url_not_canonical"}
 
 
 def prepare(
@@ -414,45 +465,33 @@ def prepare(
         raise ValueError(f"author salt must be at least {MIN_SALT_BYTES} bytes")
     _checked_ids(item)
     names = (item.author,) if item.author else ()
-
-    body = clean_text(item.text)
-    title = clean_text(item.title, limit=4 * MAX_TITLE_CHARS) if item.title is not None else None
-    body_text = scrub_identity(body.text, names)
-    title_scrub = scrub_identity(title.text[:MAX_TITLE_CHARS], names) if title else None
-    title_text = title_scrub.text if title_scrub else None
-    if not body_text.text.strip() and not title_text:
+    texts = _clean_title_and_text(item, names)
+    if not texts.text.strip() and not texts.title:
         raise IngestRejected("empty after cleaning")
 
-    flags = set(body.flags) | (set(title.flags) if title else set())
-    flags |= {f for f in item.flags if _FLAG_NAME.fullmatch(f)}
-    if title and len(title.text) > MAX_TITLE_CHARS:
-        flags.add("truncated")
-    if body_text.changed or (title_scrub and title_scrub.changed):
-        flags.add("identity_scrubbed")
-    combined = f"{title_text or ''}\n{body_text.text}"
-    flags |= scan_flags(combined)
+    combined = f"{texts.title or ''}\n{texts.text}"
     raw, raw_flags = _safe_raw(item.raw, names)
-    flags |= raw_flags
+    url, url_canonical, url_flags = _clean_link(item.url)
+    # Links and file names can carry injection text too; flag it, score only prose.
+    scanned = f"{combined}\n{item.url or ''}\n{item.locator or ''}"
+    flags = set(texts.flags) | raw_flags | url_flags | scan_flags(scanned)
+    flags |= {f for f in item.flags if _FLAG_NAME.fullmatch(f)}
     if item.posted_at is not None and item.posted_at > now() + FUTURE_SLACK:
         flags.add("posted_in_future")
-    url = _scrubbed_or_none(item.url, names)
-    url_canonical = canonical_url(url)
-    if url and url_canonical is None:
-        flags.add("url_not_canonical")  # stored, but it won't dedupe across sources
     intent = score_intent(combined, lexicon)
 
     return SignalRow(
         external_id=item.external_id,
         url=url,
         url_canonical=url_canonical,
-        locator=_scrubbed_or_none(item.locator, names),
-        title=title_text,
-        text=body_text.text,
+        locator=scrub_identity(item.locator).text if item.locator is not None else None,
+        title=texts.title,
+        text=texts.text,
         author_hash=author_hash(salt, source, item.author) if item.author else None,
         points=item.points,
         num_comments=item.num_comments,
         posted_at=item.posted_at,
-        content_hash=content_hash(title_text, body_text.text),
+        content_hash=content_hash(texts.title, texts.text),
         flags=tuple(sorted(flags)),
         raw=raw,
         intent_score=intent.score,

@@ -107,7 +107,8 @@ class RedditParams(_Strict):
     subreddits: Annotated[
         tuple[Annotated[str, Field(pattern=r"^[A-Za-z0-9_]{2,21}$")], ...], Field(min_length=1)
     ]
-    listing: Literal["new", "top", "hot"] = "new"
+    # Only "new" is ordered by date, which the connector's window check relies on.
+    listing: Literal["new"] = "new"
     limit: Annotated[int, Field(ge=1, le=100)] = 100
     lookback_days: Annotated[int, Field(ge=1, le=365)] = 7
     max_pages_per_subreddit: Annotated[int, Field(ge=1, le=10)] = 3
@@ -142,7 +143,8 @@ class Source(_Strict):
     params: SourceParams
     tos_url: HttpUrl | None = None
     allowed_hosts: tuple[Host, ...] = ()
-    min_interval_s: Annotated[float, Field(ge=0, le=3600)] | None = None
+    # Above zero: an API source with no spacing would hammer the provider (C3).
+    min_interval_s: Annotated[float, Field(gt=0, le=3600)] | None = None
     max_requests: Annotated[int, Field(gt=0, le=10_000)] | None = None
     # Wall-clock limit for one source in one run, so a slow site can't stall Scout.
     max_runtime_s: Annotated[int, Field(ge=1, le=3600)] = 300

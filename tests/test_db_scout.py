@@ -285,6 +285,10 @@ def test_scout_role_can_do_its_job(db: Connection) -> None:
         "SELECT 'scout', id, 'ok', now() FROM sources LIMIT 1",
         "INSERT INTO runs (agent, source_id, n_new) SELECT 'scout', id, 99 FROM sources LIMIT 1",
         "CREATE TABLE rogue (x int)",
+        "CREATE TEMP TABLE rogue (x int)",
+        "INSERT INTO decisions_log (agent, action, reason) VALUES ('ceo', 'x', 'forged')",
+        "INSERT INTO decisions_log (agent, action, reason, ts) "
+        "VALUES ('scout', 'x', 'backdated', now() - interval '1 year')",
     ],
 )
 def test_scout_role_limits(db: Connection, ids: tuple[int, int], sql: str) -> None:
@@ -434,3 +438,20 @@ def test_planned_queries_can_use_their_index(db: Connection, query: str, index: 
     db.execute(text("SET LOCAL enable_sort = off"))
     plan = "\n".join(db.execute(text(f"EXPLAIN {query}")).scalars())
     assert index in plan, plan
+
+
+def test_signals_cannot_join_a_finished_run(db: Connection, ids: tuple[int, int]) -> None:
+    source_id, run_id = ids
+    db.execute(
+        text("UPDATE runs SET status = 'ok', finished_at = now() WHERE id = :id"), {"id": run_id}
+    )
+    _fails_insert(db, _signal_params(source_id, run_id), code=DENIED)
+
+
+def test_api_source_needs_a_positive_interval(db: Connection) -> None:
+    _fails(
+        db,
+        "INSERT INTO sources (name, type, enabled, tos_url, allowed_hosts, min_interval_s, "
+        "max_requests) VALUES ('fast', 'api', true, 'https://e.com', '{e.com}', 0, 5)",
+        code=CHECK,
+    )

@@ -31,10 +31,16 @@ class FetchedItem:
 
 @dataclass(frozen=True)
 class Rejection:
-    """An item the connector refused before ingest (inbox rows mostly)."""
+    """Something the connector skipped, with why.
+
+    `incomplete` means part of the source's window was never read (a page cap,
+    a truncated search). The run is then marked partial, so its start is not
+    used as the next watermark and the gap is read again next time.
+    """
 
     locator: str
     reason: str
+    incomplete: bool = False
 
 
 class MalformedResponse(ValueError):

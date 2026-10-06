@@ -9,8 +9,10 @@ sources:
     tos_url: https://hn.algolia.com/api
     allowed_hosts: [hn.algolia.com]
     min_interval_s: 1.0
-    max_requests: 120
-    max_runtime_s: 600
+    # Sized so the first 30-day run can finish: 29 passes, and busy windows split.
+    # Until a run finishes "ok" the watermark doesn't move (P1 plan §11).
+    max_requests: 400
+    max_runtime_s: 900
     params:
       kind: hackernews
       # Commercial-intent phrases (P1 plan §3b): money already being spent,
@@ -59,11 +61,12 @@ sources:
     tos_url: https://info.arxiv.org/help/api/tou.html
     allowed_hosts: [export.arxiv.org]
     min_interval_s: 3.0   # arXiv terms: at most one request every 3 seconds
-    max_requests: 20
+    max_requests: 40      # 40 pages of 500 covers 14 days of these categories
+    max_runtime_s: 600
     params:
       kind: arxiv
       categories: [cs.AI, cs.LG, cs.HC]
-      page_size: 100
+      page_size: 500
       lookback_days: 14
 
   - name: inbox

@@ -13,7 +13,7 @@ def api_source(
     hosts: Sequence[str] = ("hn.algolia.com",),
     *,
     enabled: bool = True,
-    interval: float = 0.0,
+    interval: float = 0.001,
     max_requests: int = 50,
     params: dict[str, Any] | None = None,
 ) -> Source:

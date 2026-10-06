@@ -547,3 +547,75 @@ def test_connector_flags_reach_the_signal_and_odd_names_do_not() -> None:
     row = prepare(item, source="inbox", salt=SALT, lexicon=LEX)
     assert "encoding_replaced" in row.flags
     assert "Bad Flag!" not in row.flags
+
+
+def test_author_name_never_rewrites_links() -> None:
+    item = _item(author="python", url="https://python.org/doc", locator="item")
+    row = prepare(item, source="hn", salt=SALT, lexicon=LEX)
+    assert row.url == "https://python.org/doc"
+    assert row.url_canonical == "python.org/doc"
+    assert row.locator == "item"
+
+
+def test_profile_links_get_no_dedupe_key() -> None:
+    a = prepare(_item(url="https://github.com/alice"), source="hn", salt=SALT, lexicon=LEX)
+    assert a.url == "https://github.com/[user]"
+    assert a.url_canonical is None
+    assert "url_not_canonical" in a.flags
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "<" + " " * 32_000 + "x",
+        "<" + " " * 16_000 + "/" + " " * 16_000 + "x",
+        "ignore" + " " * 32_000,
+    ],
+    ids=["lt-spaces", "lt-slash", "ignore-spaces"],
+)
+def test_html_and_instruction_patterns_stay_linear(text: str) -> None:
+    import time
+
+    started = time.perf_counter()
+    scan_flags(text)
+    assert time.perf_counter() - started < 1.0
+
+
+def test_instruction_split_across_lines_is_flagged() -> None:
+    assert "instruction_like" in scan_flags("ignore\nprevious instructions")
+
+
+@pytest.mark.parametrize(
+    ("url", "gone"),
+    [
+        ("https://twitter.com/%62obsmith", "bobsmith"),
+        ("https://twitter.com/intent/user?screen_name=bobsmith", "bobsmith"),
+    ],
+)
+def test_encoded_and_query_names_are_scrubbed_from_links(url: str, gone: str) -> None:
+    row = prepare(_item(url=url), source="hn", salt=SALT, lexicon=LEX)
+    assert gone not in (row.url or "")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"url": "https://twitter.com/​bob"},
+        {"url": "https://e.com/\x00"},
+        {"locator": "notes‮.txt", "url": None},
+        {"external_id": "12\ud83d"},
+        {"points": 2**31},
+    ],
+)
+def test_ids_and_links_must_already_be_clean(overrides: dict[str, object]) -> None:
+    with pytest.raises(IngestRejected):
+        prepare(_item(**overrides), source="hn", salt=SALT, lexicon=LEX)
+
+
+def test_non_finite_raw_numbers_are_dropped_and_flagged() -> None:
+    row = prepare(
+        _item(raw={"ratio": float("nan"), "k\x00": 1}), source="hn", salt=SALT, lexicon=LEX
+    )
+    assert row.raw["ratio"] is None
+    assert "k" in row.raw
+    assert "raw_value_dropped" in row.flags

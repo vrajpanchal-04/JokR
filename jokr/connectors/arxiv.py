@@ -55,7 +55,9 @@ def _when(text: str | None) -> datetime | None:
 def _entry(elem: Any) -> FetchedItem | Rejection:
     match = _ID.search(_squash(elem.findtext(f"{_ATOM}id")))
     if match is None:
-        return Rejection("arxiv:?", "entry without an arXiv id")
+        # arXiv reports API errors as an entry without a paper id, so this may
+        # mean the query itself failed: the run is marked partial, not ok.
+        return Rejection("arxiv:?", "entry without an arXiv id", incomplete=True)
     arxiv_id = match.group("id")
     posted_at = _when(elem.findtext(f"{_ATOM}published"))
     if posted_at is None:

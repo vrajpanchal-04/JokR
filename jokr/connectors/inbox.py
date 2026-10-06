@@ -95,7 +95,7 @@ class InboxConnector:
     async def fetch(self, since: datetime | None) -> AsyncIterator[FetchedItem | Rejection]:
         # The inbox is re-read whole each run; the DB's unique key drops repeats.
         if not self._root.is_dir():
-            yield Rejection("inbox", f"inbox folder not found: {self._root.name}")
+            yield Rejection("inbox", f"inbox folder not found: {self._root.name}", incomplete=True)
             return
         root = self._root.resolve()
         files: list[Path] = []
@@ -105,8 +105,10 @@ class InboxConnector:
                 yield entry
             else:
                 files.append(entry)
-        if budget[0] <= 0:
-            yield Rejection("inbox", f"stopped listing after {MAX_WALK_ENTRIES} entries")
+        if budget[0] < 0:
+            yield Rejection(
+                "inbox", f"stopped listing after {MAX_WALK_ENTRIES} entries", incomplete=True
+            )
         files.sort()
         for path in files[: self._params.max_files]:
             for item in self._read(root, path):
@@ -114,7 +116,9 @@ class InboxConnector:
         deferred = len(files) - self._params.max_files
         if deferred > 0:
             yield Rejection(
-                "inbox", f"file limit {self._params.max_files} reached; {deferred} deferred"
+                "inbox",
+                f"file limit {self._params.max_files} reached; {deferred} deferred",
+                incomplete=True,
             )
 
     def _walk(
@@ -143,6 +147,10 @@ class InboxConnector:
                 elif entry.is_dir(follow_symlinks=False):
                     if depth < self._params.max_depth:
                         yield from self._walk(root, path, depth + 1, budget)
+                    else:
+                        yield Rejection(
+                            rel, f"folder deeper than max_depth {self._params.max_depth}"
+                        )
                 elif entry.is_file(follow_symlinks=False):
                     yield path
                 else:
@@ -218,6 +226,7 @@ class InboxConnector:
                         rel,
                         f"row limit {self._params.max_rows_per_file} reached; "
                         "the rest of the file was not read",
+                        incomplete=True,
                     )
                     return
                 locator = f"{rel}:{first_row + n}"
@@ -269,6 +278,9 @@ def _read_regular_file(path: Path, max_bytes: int) -> bytes:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise OSError(errno.EINVAL, "not a regular file")
+        if info.st_nlink > 1:
+            # A hard link can point at a file outside the inbox.
+            raise OSError(errno.EMLINK, "hard-linked file")
         if info.st_size > max_bytes:
             raise _TooBig(info.st_size)
         with os.fdopen(fd, "rb", closefd=False) as handle:

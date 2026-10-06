@@ -95,6 +95,10 @@ def _created_sources() -> None:
             name="sources_interval",
         ),
         sa.CheckConstraint("max_requests IS NULL OR max_requests > 0", name="sources_max_requests"),
+        # An API source with no spacing would hammer the provider (C3).
+        sa.CheckConstraint(
+            "type <> 'api' OR min_interval_s > 0", name="sources_api_interval_positive"
+        ),
     )
 
 
@@ -145,7 +149,7 @@ def _created_runs() -> None:
             name="runs_rejections_shape",
         ),
     )
-    op.create_index("ix_runs_agent_started", "runs", ["agent", sa.text("started_at DESC")])
+    # Scout's watermark: the newest ok run per source.
     op.create_index("ix_runs_source_started", "runs", ["source_id", sa.text("started_at DESC")])
     # A finished run is a logged fact (C5): its counts can never be rewritten later.
     op.execute(
@@ -241,19 +245,6 @@ def _created_signals() -> None:
         ),
         sa.CheckConstraint("char_length(intent_version) >= 1", name="signals_intent_version"),
     )
-    # Watermark: newest posted_at per source.
-    op.create_index(
-        "ix_signals_source_posted", "signals", ["source_id", sa.text("posted_at DESC NULLS LAST")]
-    )
-    op.create_index(
-        "ix_signals_source_engagement",
-        "signals",
-        [
-            "source_id",
-            sa.text("points DESC NULLS LAST"),
-            sa.text("num_comments DESC NULLS LAST"),
-        ],
-    )
     # `scout stats --top N`: intent, then points, then comments.
     op.create_index(
         "ix_signals_rank",
@@ -265,7 +256,6 @@ def _created_signals() -> None:
             "id",
         ],
     )
-    op.create_index("ix_signals_fetched_at", "signals", ["fetched_at"])
     # Recurring pain: group by fingerprint, count distinct sources and days.
     op.create_index(
         "ix_signals_content_hash",
@@ -306,6 +296,30 @@ def _created_signals() -> None:
         FOR EACH STATEMENT EXECUTE FUNCTION signals_insert_only()
         """
     )
+    # A signal can only join a run that is still going. Otherwise rows could be
+    # added to a finished run and its logged n_new would stop matching (C5).
+    op.execute(
+        """
+        CREATE FUNCTION signals_run_is_open() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT FROM runs WHERE id = NEW.run_id AND status = 'running'
+            ) THEN
+                RAISE EXCEPTION 'run % is finished; it takes no more signals', NEW.run_id
+                    USING ERRCODE = 'insufficient_privilege';
+            END IF;
+            RETURN NEW;
+        END;
+        $$
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER signals_run_open BEFORE INSERT ON signals
+        FOR EACH ROW EXECUTE FUNCTION signals_run_is_open()
+        """
+    )
 
 
 def _granted() -> None:
@@ -328,8 +342,38 @@ def _granted() -> None:
     op.execute(f"GRANT SELECT, INSERT ({', '.join(RUN_INSERTABLE)}) ON runs TO {SCOUT_ROLE}")
     op.execute(f"GRANT UPDATE ({', '.join(RUN_UPDATABLE)}) ON runs TO {SCOUT_ROLE}")
     # Scout appends to the log (C10) and may read back only the id it just wrote.
-    op.execute(f"GRANT INSERT, SELECT (id) ON decisions_log TO {SCOUT_ROLE}")
+    # It can't set id or ts, so it can't backdate an entry.
+    op.execute(
+        f"GRANT INSERT (agent, action, reason, evidence_ids), SELECT (id) "
+        f"ON decisions_log TO {SCOUT_ROLE}"
+    )
+    # And it can only write as itself, never as another agent.
+    op.execute(
+        f"""
+        CREATE FUNCTION decisions_log_scout_is_scout() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF current_user = '{SCOUT_ROLE}' AND NEW.agent <> 'scout' THEN
+                RAISE EXCEPTION 'jokr_scout may only log as agent scout'
+                    USING ERRCODE = 'insufficient_privilege';
+            END IF;
+            RETURN NEW;
+        END;
+        $$
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER decisions_log_scout_agent BEFORE INSERT ON decisions_log
+        FOR EACH ROW EXECUTE FUNCTION decisions_log_scout_is_scout()
+        """
+    )
     op.execute(f"GRANT SELECT ON sources, signals, runs TO {APP_ROLE}")
+    # Every role can make temp tables by default; none of ours needs to.
+    op.execute(
+        "DO $$ BEGIN EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC', "
+        "current_database()); END $$"
+    )
 
 
 def upgrade() -> None:
@@ -340,24 +384,33 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # signals is the evidence ledger that decisions_log.evidence_ids points into.
-    # Dropping it with rows in it would orphan that history, so refuse.
+    # signals and runs are evidence that decisions_log.evidence_ids points into.
+    # Dropping them with rows would orphan that history, so refuse. The lock
+    # stops a run from adding rows between the check and the drop.
+    op.execute("LOCK TABLE signals, runs IN ACCESS EXCLUSIVE MODE")
     op.execute(
         """
         DO $$
         BEGIN
-            IF EXISTS (SELECT FROM signals) THEN
-                RAISE EXCEPTION 'refusing to downgrade 0002: signals has rows';
+            IF EXISTS (SELECT FROM signals) OR EXISTS (SELECT FROM runs) THEN
+                RAISE EXCEPTION 'refusing to downgrade 0002: signals or runs has rows';
             END IF;
         END
         $$
         """
     )
+    op.execute(
+        "DO $$ BEGIN EXECUTE format('GRANT TEMPORARY ON DATABASE %I TO PUBLIC', "
+        "current_database()); END $$"
+    )
     op.execute(f"REVOKE ALL ON sources, signals, runs FROM {APP_ROLE}, {SCOUT_ROLE}")
     op.execute(f"REVOKE ALL ON decisions_log FROM {SCOUT_ROLE}")
+    op.execute("DROP TRIGGER decisions_log_scout_agent ON decisions_log")
+    op.execute("DROP FUNCTION decisions_log_scout_is_scout()")
     op.execute(f"REVOKE USAGE ON SCHEMA public FROM {SCOUT_ROLE}")
     op.drop_table("signals")  # drops its triggers too
     op.drop_table("runs")
     op.drop_table("sources")
     op.execute("DROP FUNCTION signals_insert_only()")
+    op.execute("DROP FUNCTION signals_run_is_open()")
     op.execute("DROP FUNCTION runs_finished_is_final()")

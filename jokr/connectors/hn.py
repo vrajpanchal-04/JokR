@@ -108,6 +108,7 @@ class HackerNewsConnector:
                 f"hn:{tag}:{query or '*'}"[:300],
                 f"{n_hits} hits in {start:%Y-%m-%d %H:%M} to {end:%H:%M}; "
                 f"Algolia serves only the first {ALGOLIA_MAX_HITS}",
+                incomplete=True,
             )
         for hit in hits:
             yield _to_item(hit)

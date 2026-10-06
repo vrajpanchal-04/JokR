@@ -35,7 +35,7 @@ def seeded(committed_db_url: str) -> str:
             conn.execute(
                 text(
                     "INSERT INTO sources (name, type, enabled, tos_url, allowed_hosts, "
-                    "min_interval_s, max_requests) VALUES (:n, 'api', true, :t, :h, 0, 50)"
+                    "min_interval_s, max_requests) VALUES (:n, 'api', true, :t, :h, 1, 50)"
                 ),
                 {"n": s.name, "t": str(s.tos_url), "h": list(s.allowed_hosts)},
             )
@@ -313,3 +313,129 @@ async def test_no_enabled_sources_is_an_error(scout_engine: AsyncEngine, owner: 
     result = await run_scout(scout_engine, [], _deps({}))
     assert result.exit_code == 1
     assert _last_log(owner).reason == "no enabled sources"
+
+
+# --- second review round ---------------------------------------------------------
+
+
+async def test_incomplete_read_is_partial_and_keeps_the_watermark(
+    scout_engine: AsyncEngine, owner: Any
+) -> None:
+    ok = await run_scout(scout_engine, [HN], _deps({"hackernews": Fake()}))
+    started = _run_row(owner, ok.outcomes[0].run_id).started_at
+    cut = Rejection("hn:story:x", "2400 hits; Algolia serves only the first 1000", incomplete=True)
+    result = await run_scout(scout_engine, [HN], _deps({"hackernews": Fake([cut])}))
+    assert result.outcomes[0].status == "partial"
+    assert "not fully read" in (result.outcomes[0].error or "")
+    fake = Fake()
+    await run_scout(scout_engine, [HN], _deps({"hackernews": fake}))
+    assert fake.since == [started]
+
+
+async def test_abandoned_running_rows_are_closed(scout_engine: AsyncEngine, owner: Any) -> None:
+    with owner.begin() as conn:
+        stale = conn.execute(
+            text(
+                "INSERT INTO runs (agent, source_id) SELECT 'scout', id FROM sources "
+                "WHERE name = 'hackernews' RETURNING id"
+            )
+        ).scalar_one()
+    await run_scout(scout_engine, [HN], _deps({"hackernews": Fake()}))
+    row = _run_row(owner, stale)
+    assert row.status == "failed"
+    assert "abandoned" in row.error
+
+
+async def test_lock_is_released_after_each_run(scout_engine: AsyncEngine, owner: Any) -> None:
+    for _ in range(3):  # same engine and pool, as a long-lived scheduler would use
+        result = await run_scout(scout_engine, [HN], _deps({"hackernews": Fake()}))
+        assert result.outcomes[0].status == "ok"
+    with owner.connect() as conn:
+        held = conn.execute(
+            text(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+                "AND objid = hashtext('jokr.scout.hackernews')::oid "
+                # pg_locks is cluster-wide; other test databases run Scout too.
+                "AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+            )
+        ).scalar_one()
+    assert held == 0
+
+
+async def test_setup_failure_does_not_stop_other_sources(
+    scout_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jokr.agents import scout
+
+    real = scout._watermark
+
+    async def broken(conn: Any, source_id: int) -> Any:
+        if source_id == hn_id:
+            raise RuntimeError("watermark query broke")
+        return await real(conn, source_id)
+
+    async with scout_engine.connect() as conn:
+        hn_id = (
+            await conn.execute(text("SELECT id FROM sources WHERE name = 'hackernews'"))
+        ).scalar_one()
+    monkeypatch.setattr(scout, "_watermark", broken)
+    fakes = {"hackernews": Fake(), "arxiv": Fake([_item(_ids(1)[0])])}
+    result = await run_scout(scout_engine, [HN, ARXIV], _deps(fakes))
+    hn, arxiv = result.outcomes
+    assert hn.status == "failed" and "watermark query broke" in (hn.error or "")
+    assert arxiv.status == "ok" and arxiv.n_new == 1
+
+
+async def test_a_row_postgres_refuses_costs_only_that_row(
+    scout_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy.exc import DataError
+
+    from jokr.agents import scout
+
+    real = scout._insert
+    ids = _ids(3)
+
+    async def picky(engine: Any, source_id: int, run_id: int, rows: Any) -> int:
+        if any(r.external_id == ids[1] for r in rows):
+            raise DataError("INSERT ...", {}, Exception("value out of range"))
+        return await real(engine, source_id, run_id, rows)
+
+    monkeypatch.setattr(scout, "_insert", picky)
+    result = await run_scout(
+        scout_engine, [HN], _deps({"hackernews": Fake([_item(i) for i in ids])})
+    )
+    outcome = result.outcomes[0]
+    assert (outcome.status, outcome.n_new, outcome.n_skipped) == ("ok", 2, 1)
+    assert "database refused" in outcome.rejections[0]["reason"]
+
+
+async def test_odd_item_that_breaks_prepare_is_rejected_not_fatal(
+    scout_engine: AsyncEngine,
+) -> None:
+    bad = _item(_ids(1)[0], raw={"flair": "\ud83d"})  # a lone surrogate
+    good = _item(_ids(1)[0])
+    result = await run_scout(scout_engine, [HN], _deps({"hackernews": Fake([bad, good])}))
+    outcome = result.outcomes[0]
+    assert outcome.status == "ok"
+    assert (outcome.n_new, outcome.n_skipped) == (1, 1)
+
+
+async def test_time_limit_during_a_write_still_counts_it(
+    scout_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jokr.agents import scout
+
+    real = scout._insert
+
+    async def slow(*args: Any) -> int:
+        await asyncio.sleep(1.5)
+        return await real(*args)
+
+    monkeypatch.setattr(scout, "_insert", slow)
+    quick = HN.model_copy(update={"max_runtime_s": 1})
+    items = [_item(i) for i in _ids(scout.BATCH_SIZE)]
+    result = await run_scout(scout_engine, [quick], _deps({"hackernews": Fake(items)}))
+    outcome = result.outcomes[0]
+    assert outcome.error == "time limit of 1s reached"
+    assert outcome.n_new == scout.BATCH_SIZE

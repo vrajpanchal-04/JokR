@@ -81,3 +81,25 @@ def test_logging_filter_masks_exception_text(caplog: pytest.LogCaptureFixture) -
         except RuntimeError:
             log.exception("boom")
     assert TOKEN not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f'password="{TOKEN} and more words"',
+        f"token={TOKEN}",
+        f"secret: {TOKEN}",
+        f"api-key={TOKEN}",
+        f"apikey={TOKEN}",
+        f"X-Api-Key: {TOKEN}",
+        f"client-secret={TOKEN}",
+        f"https://x.example/?sig={TOKEN}",
+        f"postgresql+psycopg://u:p@ss{TOKEN}@db:5432/jokr",
+    ],
+)
+def test_more_secret_shapes_are_masked(text: str) -> None:
+    assert TOKEN not in redact(text)
+
+
+def test_quoted_secret_is_masked_whole() -> None:
+    assert redact('password="my secret pass" ok') == f'password="{REDACTED}" ok'

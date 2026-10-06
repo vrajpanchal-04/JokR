@@ -117,6 +117,7 @@ class RedditConnector:
             f"reddit:r/{subreddit}",
             f"page cap of {self._params.max_pages_per_subreddit} reached before the "
             "window start; older posts were not read",
+            incomplete=True,
         )
 
 

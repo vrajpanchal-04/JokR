@@ -13,6 +13,7 @@ import respx
 from hypothesis import given
 from hypothesis import strategies as st
 
+from jokr.guards.ratelimit import BudgetExhausted
 from jokr.guards.tos import (
     MAX_ATTEMPTS,
     GuardedClient,
@@ -173,7 +174,25 @@ async def test_every_request_spends_from_the_run_budget() -> None:
     async with _client(source=api_source(max_requests=2)) as client:
         await client.get(HN)
         await client.get(HN)
-        with pytest.raises(Exception, match="max_requests"):
+        with pytest.raises(BudgetExhausted, match="max_requests"):
+            await client.get(HN)
+
+
+@respx.mock
+async def test_redirect_hops_spend_from_the_run_budget() -> None:
+    respx.get(HN).respond(302, headers={"Location": "/api/v1/other"})
+    respx.get("https://hn.algolia.com/api/v1/other").respond(200)
+    async with _client(source=api_source(max_requests=2)) as client:
+        await client.get(HN)  # the request and its redirect hop: 2
+        with pytest.raises(BudgetExhausted):
+            await client.get(HN)
+
+
+@respx.mock
+async def test_https_redirect_to_metadata_ip_is_refused() -> None:
+    respx.get(HN).respond(302, headers={"Location": "https://169.254.169.254/latest/meta-data"})
+    async with _client() as client:
+        with pytest.raises(HostNotAllowed):
             await client.get(HN)
 
 

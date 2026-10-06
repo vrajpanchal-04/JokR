@@ -72,7 +72,6 @@ class Run(Base):
     __tablename__ = "runs"
     __table_args__ = (
         UniqueConstraint("id", "source_id", name="runs_id_source"),
-        Index("ix_runs_agent_started", "agent", text("started_at DESC")),
         Index("ix_runs_source_started", "source_id", text("started_at DESC")),
     )
 
@@ -105,13 +104,6 @@ class Signal(Base):
             ondelete="RESTRICT",
         ),
         UniqueConstraint("source_id", "external_id", name="signals_source_external_id"),
-        Index("ix_signals_source_posted", "source_id", text("posted_at DESC NULLS LAST")),
-        Index(
-            "ix_signals_source_engagement",
-            "source_id",
-            text("points DESC NULLS LAST"),
-            text("num_comments DESC NULLS LAST"),
-        ),
         Index(
             "ix_signals_rank",
             text("intent_score DESC"),
@@ -119,7 +111,6 @@ class Signal(Base):
             text("num_comments DESC NULLS LAST"),
             "id",
         ),
-        Index("ix_signals_fetched_at", "fetched_at"),
         Index(
             "ix_signals_content_hash",
             "content_hash",

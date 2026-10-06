@@ -8,7 +8,7 @@ never deleted, because its signals still reference it.
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -54,6 +54,4 @@ async def sync_sources(engine: AsyncEngine, sources: Sequence[Source]) -> SyncRe
             .scalars()
             .all()
         )
-        # Read back inside the transaction so the result reflects what was written.
-        current = (await conn.execute(select(SourceRecord.name))).scalars().all()
-    return SyncResult(tuple(sorted(set(names) & set(current))), tuple(sorted(retired)))
+    return SyncResult(tuple(sorted(names)), tuple(sorted(retired)))

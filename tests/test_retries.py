@@ -26,7 +26,7 @@ class Clock:
         self.now += seconds
 
 
-def _client(clock: Clock, *, interval: float = 0.0, max_requests: int = 50) -> GuardedClient:
+def _client(clock: Clock, *, interval: float = 0.001, max_requests: int = 50) -> GuardedClient:
     return GuardedClient(
         api_source(interval=interval, max_requests=max_requests),
         resolver=public_resolver,
@@ -139,3 +139,9 @@ async def test_errors_never_carry_the_authorization_header() -> None:
     # The original exception (which holds the request and its headers) is not chained.
     assert err.__cause__ is None
     assert err.__suppress_context__
+
+
+def test_non_ascii_digits_in_retry_after_are_ignored() -> None:
+    from jokr.guards.tos import _retry_after_seconds
+
+    assert _retry_after_seconds("²") is None

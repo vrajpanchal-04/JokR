@@ -50,8 +50,12 @@ class ScoutSettings(Settings):
     @field_validator("author_hash_salt")
     @classmethod
     def _salt_is_strong(cls, value: SecretStr) -> SecretStr:
-        if len(value.get_secret_value().encode()) < 32:
+        salt = value.get_secret_value()
+        if len(salt.encode()) < 32:
             raise ValueError("author_hash_salt must be at least 32 bytes")
+        # The .env.example placeholder, or anything as guessable, keys nothing.
+        if "replace-with" in salt or len(set(salt)) < 16:
+            raise ValueError("author_hash_salt looks like a placeholder; generate a random one")
         return value
 
     @property

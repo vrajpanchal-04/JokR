@@ -232,3 +232,23 @@ def test_reader_refuses_a_symlink_even_if_the_walk_missed_it(tmp_path: Path) -> 
     link.symlink_to(target)
     with pytest.raises(OSError):
         _read_regular_file(link, 100)
+
+
+async def test_folders_past_max_depth_are_reported(tmp_path: Path) -> None:
+    deep = tmp_path / "a" / "b"
+    deep.mkdir(parents=True)
+    (deep / "x.txt").write_text("hidden away")
+    results = await _collect(tmp_path, max_depth=1)
+    assert _items(results) == []
+    (rejection,) = _rejections(results)
+    assert rejection.locator == "a/b"
+    assert "max_depth" in rejection.reason
+
+
+async def test_hard_links_are_refused(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
+    outside.write_text("not for the inbox")
+    os.link(outside, tmp_path / "a.txt")
+    results = await _collect(tmp_path)
+    assert _items(results) == []
+    assert "unreadable" in _rejections(results)[0].reason

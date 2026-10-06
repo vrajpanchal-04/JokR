@@ -11,6 +11,8 @@ import sys
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
+from pydantic import ValidationError
+
 from jokr.agents.scout import OpenConnector, ScoutDeps, run_scout
 from jokr.agents.scout_stats import Stats, scout_stats
 from jokr.agents.sources_sync import sync_sources
@@ -167,6 +169,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(_scout_stats(args.top))
     except ConfigError as exc:
         log.error("config error: %s", exc)
+        return 1
+    except ValidationError as exc:
+        # Settings from the environment: name the bad fields, never echo their values.
+        fields = ", ".join(".".join(str(p) for p in e["loc"]) for e in exc.errors())
+        log.error("settings error in: %s", fields or "environment")
         return 1
 
 

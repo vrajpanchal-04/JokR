@@ -12,6 +12,10 @@ from typing import NoReturn
 REDACTED = "[REDACTED]"
 
 _VALUE = r"[^\s'\",}&;]+"
+_KEYS = (
+    r"(?<![\w-])(?:access_token|refresh_token|id_token|client[_-]?secret|api[_-]?key|x-api-key"
+    r"|password|passwd|secret|token|sig|signature)"
+)
 _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # Authorization: Bearer x / 'Authorization': 'Basic x' / authorization=x
     (
@@ -22,17 +26,18 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         rf"\1\2{REDACTED}",
     ),
     (re.compile(rf"\b(bearer\s+){_VALUE}", re.IGNORECASE), rf"\1{REDACTED}"),
-    # Token-ish fields in JSON, form bodies and query strings.
+    # Token-ish fields in JSON, form bodies, headers and query strings. Quoted
+    # values first, so a quoted value with spaces is redacted whole.
     (
-        re.compile(
-            r"((?:access_token|refresh_token|id_token|client_secret|api_key|password)"
-            rf"['\"]?\s*[:=]\s*['\"]?){_VALUE}",
-            re.IGNORECASE,
-        ),
+        re.compile(rf"({_KEYS}['\"]?\s*[:=]\s*)(['\"])[^'\"\n]{{0,2000}}\2", re.IGNORECASE),
+        rf"\1\2{REDACTED}\2",
+    ),
+    (
+        re.compile(rf"({_KEYS}['\"]?\s*[:=]\s*)(?!['\"]){_VALUE}", re.IGNORECASE),
         rf"\1{REDACTED}",
     ),
-    # scheme://user:password@host
-    (re.compile(r"(://[^/\s:@]+:)[^@\s/]+@"), rf"\1{REDACTED}@"),
+    # scheme://user:password@host, up to the last "@" so a password may contain one.
+    (re.compile(r"(://[^/\s:@]+:)\S+@"), rf"\1{REDACTED}@"),
 )
 
 

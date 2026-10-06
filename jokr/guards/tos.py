@@ -290,7 +290,12 @@ class GuardedClient:
         response.request = request
         try:
             declared = response.headers.get("content-length")
-            if declared is not None and declared.isdigit() and int(declared) > self._max_bytes:
+            if (
+                declared is not None
+                and declared.isascii()
+                and declared.isdigit()
+                and int(declared) > self._max_bytes
+            ):
                 raise ResponseTooLarge(f"declared {declared} bytes > cap {self._max_bytes}")
             body = bytearray()
             # aiter_bytes yields decoded bytes, so a compression bomb hits the cap too.
@@ -309,7 +314,7 @@ class GuardedClient:
 def _retry_after_seconds(value: str) -> float | None:
     """Retry-After is either delta-seconds or an HTTP date (RFC 9110 §10.2.3)."""
     value = value.strip()
-    if value.isdigit():
+    if value.isascii() and value.isdigit():
         return float(value)
     try:
         when = parsedate_to_datetime(value)

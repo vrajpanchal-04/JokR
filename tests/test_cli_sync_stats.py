@@ -141,7 +141,7 @@ def test_config_error_exits_one(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
 def _settings(**overrides: Any) -> ScoutSettings:
     values: dict[str, Any] = {
         "database_url": "postgresql+psycopg://x:y@db/jokr",
-        "author_hash_salt": "s" * 32,
+        "author_hash_salt": "fixture-salt-0123456789abcdefghijKLMNOP",
         "inbox_root": "data/inbox",
     }
     values.update(overrides)
@@ -166,3 +166,56 @@ async def test_reddit_without_credentials_fails_loudly() -> None:
     with pytest.raises(RuntimeError, match="credentials"):
         async with make_open_connector(_settings())(reddit):
             pass
+
+
+# --- exit codes end to end (B5, B6) -------------------------------------------------
+
+
+def _scout_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://x:y@127.0.0.1:1/none")
+    monkeypatch.setenv("AUTHOR_HASH_SALT", "fixture-salt-0123456789abcdefghijKLMNOP")
+
+
+@pytest.mark.parametrize(("status", "code"), [("ok", 0), ("partial", 0), ("failed", 1)])
+def test_scout_run_returns_the_runs_exit_code(
+    monkeypatch: pytest.MonkeyPatch, status: str, code: int
+) -> None:
+    from jokr import cli
+    from jokr.agents.scout import ScoutResult
+
+    _scout_env(monkeypatch)
+
+    async def fake_run(*args: Any, **kwargs: Any) -> ScoutResult:
+        return ScoutResult(status, code, ())  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cli, "run_scout", fake_run)
+    assert main(["scout", "run"]) == code
+
+
+def test_c3_violation_exits_two(monkeypatch: pytest.MonkeyPatch) -> None:
+    from jokr import cli
+    from jokr.agents.scout import ScoutResult
+
+    _scout_env(monkeypatch)
+
+    async def fake_run(*args: Any, **kwargs: Any) -> ScoutResult:
+        return ScoutResult("failed", 2, ())
+
+    monkeypatch.setattr(cli, "run_scout", fake_run)
+    assert main(["scout", "run"]) == 2
+
+
+def test_unknown_source_exits_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    _scout_env(monkeypatch)
+    assert main(["scout", "run", "--source", "nope"]) == 1
+
+
+def test_bad_settings_exit_one_without_echoing_values(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _scout_env(monkeypatch)
+    monkeypatch.setenv("AUTHOR_HASH_SALT", "too-short-secret-value")
+    assert main(["scout", "run"]) == 1
+    logged = capsys.readouterr().err  # the CLI's own handler writes to stderr
+    assert "author_hash_salt" in logged
+    assert "too-short-secret-value" not in logged
