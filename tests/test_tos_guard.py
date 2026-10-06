@@ -101,6 +101,14 @@ async def test_any_private_answer_in_the_dns_set_is_refused(ip: str) -> None:
 
 
 @respx.mock
+async def test_redirect_without_location_is_an_error_not_a_response() -> None:
+    respx.get(HN).respond(302)
+    async with _client() as client:
+        with pytest.raises(GuardError, match="Location"):
+            await client.get(HN)
+
+
+@respx.mock
 async def test_redirect_to_unlisted_host_is_refused() -> None:
     respx.get(HN).respond(302, headers={"Location": "https://evil.example.com/steal"})
     evil = respx.get("https://evil.example.com/steal").respond(200)

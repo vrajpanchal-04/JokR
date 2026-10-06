@@ -225,8 +225,10 @@ class GuardedClient:
             raise GuardError("streamed request bodies are not supported") from None
         for _ in range(MAX_REDIRECTS + 1):
             response = await self._send_with_retries(request)
-            if response.status_code not in _REDIRECT_CODES or "location" not in response.headers:
+            if response.status_code not in _REDIRECT_CODES:
                 return response
+            if "location" not in response.headers:
+                raise GuardError(f"HTTP {response.status_code} redirect without a Location")
             request = self._next_hop(request, response)
         raise TooManyRedirects(f"more than {MAX_REDIRECTS} redirects")
 

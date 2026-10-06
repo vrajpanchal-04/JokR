@@ -149,14 +149,70 @@ async def test_second_run_is_idempotent(scout_engine: AsyncEngine) -> None:
     assert (second.outcomes[0].n_fetched, second.outcomes[0].n_new) == (4, 0)
 
 
-async def test_watermark_is_passed_to_the_connector(scout_engine: AsyncEngine) -> None:
-    newest = datetime(2027, 1, 1, tzinfo=UTC)
-    await run_scout(
-        scout_engine, [HN], _deps({"hackernews": Fake([_item(_ids(1)[0], posted_at=newest)])})
+async def test_watermark_is_the_start_of_the_last_ok_run(
+    scout_engine: AsyncEngine, owner: Any
+) -> None:
+    # A far-future post must not drag the watermark forward and hide real items.
+    future = datetime(2030, 1, 1, tzinfo=UTC)
+    first = await run_scout(
+        scout_engine, [HN], _deps({"hackernews": Fake([_item(_ids(1)[0], posted_at=future)])})
     )
+    started = _run_row(owner, first.outcomes[0].run_id).started_at
     fake = Fake()
     await run_scout(scout_engine, [HN], _deps({"hackernews": fake}))
-    assert fake.since == [newest]
+    assert fake.since == [started]
+
+
+async def test_unfinished_runs_do_not_move_the_watermark(
+    scout_engine: AsyncEngine, owner: Any
+) -> None:
+    ok = await run_scout(scout_engine, [HN], _deps({"hackernews": Fake()}))
+    started = _run_row(owner, ok.outcomes[0].run_id).started_at
+    # A budget-capped run stored only its newest items, so older ones were never read.
+    capped = Fake([_item(_ids(1)[0])], error=BudgetExhausted("max_requests=1 reached"))
+    await run_scout(scout_engine, [HN], _deps({"hackernews": capped}))
+    await run_scout(scout_engine, [HN], _deps({"hackernews": Fake(error=RuntimeError("x"))}))
+    fake = Fake()
+    await run_scout(scout_engine, [HN], _deps({"hackernews": fake}))
+    assert fake.since == [started]
+
+
+async def test_repeats_within_a_run_are_not_counted_as_fetched(
+    scout_engine: AsyncEngine,
+) -> None:
+    item = _item(_ids(1)[0])
+    result = await run_scout(scout_engine, [HN], _deps({"hackernews": Fake([item, item])}))
+    outcome = result.outcomes[0]
+    assert (outcome.n_fetched, outcome.n_new, outcome.n_skipped) == (1, 1, 0)
+
+
+async def test_rejection_locators_are_scrubbed(scout_engine: AsyncEngine, owner: Any) -> None:
+    bad = Rejection("https://www.reddit.com/user/janedoe/x", "bad")
+    result = await run_scout(scout_engine, [HN], _deps({"hackernews": Fake([bad])}))
+    row = _run_row(owner, result.outcomes[0].run_id)
+    assert "janedoe" not in str(row.rejections)
+
+
+async def test_failed_final_store_keeps_the_original_error(
+    scout_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jokr.agents import scout
+
+    async def broken_store(*args: Any) -> int:
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(scout, "_store", broken_store)
+    fake = Fake([_item(_ids(1)[0])], error=RuntimeError("source broke"))
+    result = await run_scout(scout_engine, [HN], _deps({"hackernews": fake}))
+    error = result.outcomes[0].error or ""
+    assert "source broke" in error
+    assert "1 fetched item(s) could not be stored" in error
+
+
+async def test_unexpected_errors_say_where_they_happened(scout_engine: AsyncEngine) -> None:
+    fake = Fake(error=KeyError("objectID"))
+    result = await run_scout(scout_engine, [HN], _deps({"hackernews": fake}))
+    assert "test_scout_run.py:" in (result.outcomes[0].error or "")
 
 
 async def test_one_broken_source_does_not_stop_the_other(
@@ -220,6 +276,7 @@ async def test_rejections_are_counted_and_capped(scout_engine: AsyncEngine, owne
     assert outcome.n_skipped == 151
     row = _run_row(owner, outcome.run_id)
     assert len(row.rejections) == 100
+    assert row.rejections[-1]["reason"] == "52 more rejections not listed"
     assert row.n_skipped == 151
 
 

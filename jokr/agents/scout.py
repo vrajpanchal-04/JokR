@@ -8,17 +8,19 @@ what this code actually stored (C5).
 
 import asyncio
 import logging
+import traceback
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Literal
 
 from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from jokr.agents.scout_ingest import IngestRejected, SignalRow, prepare
+from jokr.agents.scout_ingest import IngestRejected, SignalRow, prepare, scrub_identity
 from jokr.config import IntentLexicon, Source
 from jokr.connectors.base import Connector, FetchedItem, Rejection
 from jokr.db.models import DecisionLog, Run, Signal, SourceRecord
@@ -49,11 +51,24 @@ class SourceOutcome:
     error: str | None = None
     c3_violation: bool = False
     rejections: list[dict[str, str]] = field(default_factory=list)
+    unstored: str | None = None  # set when the final write failed during another error
 
     def reject(self, locator: str, reason: str) -> None:
         self.n_skipped += 1
-        if len(self.rejections) < MAX_REJECTIONS:
+        # One slot is kept for the "N more" marker, so a cut list says it was cut.
+        if len(self.rejections) < MAX_REJECTIONS - 1:
+            # Locators can be URLs or file names that carry someone's handle.
+            locator = scrub_identity(locator).text
             self.rejections.append({"locator": locator[:300], "reason": reason[:300]})
+
+    def stored_rejections(self) -> list[dict[str, str]]:
+        extra = self.n_skipped - len(self.rejections)
+        if extra <= 0:
+            return self.rejections
+        return [
+            *self.rejections,
+            {"locator": "scout", "reason": f"{extra} more rejections not listed"},
+        ]
 
 
 @dataclass(frozen=True)
@@ -74,6 +89,12 @@ def _error_text(exc: BaseException) -> str:
     return redact(f"{type(exc).__name__}: {exc}")[:MAX_ERROR_CHARS]
 
 
+def _where(exc: BaseException) -> str:
+    """File and line the error came from. No traceback text: frames can hold secrets."""
+    frames = traceback.extract_tb(exc.__traceback__)
+    return f" (at {Path(frames[-1].filename).name}:{frames[-1].lineno})" if frames else ""
+
+
 async def _source_id(conn: AsyncConnection, name: str) -> int | None:
     row = (
         await conn.execute(
@@ -86,16 +107,17 @@ async def _source_id(conn: AsyncConnection, name: str) -> int | None:
 
 
 async def _watermark(conn: AsyncConnection, source_id: int) -> datetime | None:
-    # Same shape as ix_signals_source_posted, so it is an index lookup.
-    row = (
-        await conn.execute(
-            select(Signal.posted_at)
-            .where(Signal.source_id == source_id)
-            .order_by(Signal.posted_at.desc().nulls_last())
-            .limit(1)
+    """When the last fully successful run started.
+
+    Not the newest stored post: a partial or failed run stores its newest items
+    first, so their dates would skip the older ones it never reached, and one
+    future-dated post would hide everything before it.
+    """
+    return await conn.scalar(
+        select(func.max(Run.started_at)).where(
+            Run.source_id == source_id, Run.agent == AGENT, Run.status == "ok"
         )
-    ).first()
-    return row[0] if row else None
+    )
 
 
 async def _store(
@@ -147,15 +169,16 @@ async def _collect(
 ) -> None:
     pending: list[SignalRow] = []
     seen: set[str] = set()
+    failure: BaseException | None = None
     try:
         async for item in items:
             if isinstance(item, Rejection):
                 outcome.reject(item.locator, item.reason)
                 continue
-            outcome.n_fetched += 1
             if item.external_id in seen:
-                continue  # same item twice in one run; the DB would drop it anyway
+                continue  # same item twice in one run; counted once
             seen.add(item.external_id)
+            outcome.n_fetched += 1
             try:
                 row = prepare(item, source=source.name, salt=deps.salt, lexicon=deps.lexicon)
             except IngestRejected as exc:
@@ -165,11 +188,22 @@ async def _collect(
             if len(pending) >= BATCH_SIZE:
                 outcome.n_new += await _store(engine, source_id, run_id, pending)
                 pending.clear()
+    except BaseException as exc:
+        failure = exc
+        raise
     finally:
         # Keep what was fetched even when the source fails, times out or hits its cap.
         # Shielded so a timeout's cancellation can't abort the final write.
         if pending:
-            outcome.n_new += await asyncio.shield(_store(engine, source_id, run_id, pending))
+            try:
+                outcome.n_new += await asyncio.shield(_store(engine, source_id, run_id, pending))
+            except Exception as exc:
+                if failure is None:
+                    raise
+                # Don't let the write error replace the error that stopped the source.
+                outcome.unstored = (
+                    f"{len(pending)} fetched item(s) could not be stored: {_error_text(exc)}"
+                )
 
 
 async def _finish(engine: AsyncEngine, outcome: SourceOutcome) -> None:
@@ -184,7 +218,7 @@ async def _finish(engine: AsyncEngine, outcome: SourceOutcome) -> None:
                 n_new=outcome.n_new,
                 n_skipped=outcome.n_skipped,
                 error=outcome.error,
-                rejections=outcome.rejections,
+                rejections=outcome.stored_rejections(),
             )
         )
 
@@ -238,10 +272,12 @@ async def _run_source(engine: AsyncEngine, source: Source, deps: ScoutDeps) -> S
         except HostNotAllowed as exc:
             outcome.status, outcome.error, outcome.c3_violation = "failed", _error_text(exc), True
         except Exception as exc:  # one source must never take the others down (B5)
-            outcome.status, outcome.error = "failed", _error_text(exc)
+            outcome.status, outcome.error = "failed", _error_text(exc) + _where(exc)
             # No traceback: exception text from a source can carry secrets. The
-            # redacted message is logged here and stored on the run.
+            # redacted message and its file:line are logged here and stored on the run.
             log.error("source %s failed: %s", source.name, outcome.error)
+        if outcome.unstored:
+            outcome.error = f"{outcome.error}; {outcome.unstored}"[:MAX_ERROR_CHARS]
         await _finish(engine, outcome)
     return outcome
 

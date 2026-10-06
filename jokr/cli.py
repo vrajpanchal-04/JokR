@@ -57,7 +57,8 @@ def make_open_connector(settings: ScoutSettings) -> OpenConnector:
             elif params.kind == "arxiv":
                 yield ArxivConnector(client, params)
             else:
-                assert settings.reddit_client_id and settings.reddit_client_secret  # noqa: S101
+                if not (settings.reddit_client_id and settings.reddit_client_secret):
+                    raise RuntimeError("reddit credentials vanished after the check above")
                 yield RedditConnector(
                     client,
                     params,

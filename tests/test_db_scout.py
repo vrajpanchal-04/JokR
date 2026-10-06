@@ -416,10 +416,10 @@ def test_downgrade_revokes_scout_grants(engine: Engine, migration_config: Config
             "ix_signals_rank",
         ),
         (
-            # The form Scout uses for its watermark.
-            "SELECT posted_at FROM signals WHERE source_id = 1 "
-            "ORDER BY posted_at DESC NULLS LAST LIMIT 1",
-            "ix_signals_source_posted",
+            # The form Scout uses for its watermark: the start of the last ok run.
+            "SELECT started_at FROM runs WHERE source_id = 1 AND agent = 'scout' "
+            "AND status = 'ok' ORDER BY started_at DESC LIMIT 1",
+            "ix_runs_source_started",
         ),
         (
             "SELECT content_hash, count(DISTINCT source_id) FROM signals "
