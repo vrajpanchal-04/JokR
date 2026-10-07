@@ -6,7 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic>=1.13",
+    "certifi>=2026.7.22",
+    "defusedxml>=0.7.1",
     "fastapi>=0.115",
+    "httpx>=0.28",
     "pgvector>=0.3",
     "psycopg[binary]>=3.2",
     "pydantic>=2.8",
@@ -16,13 +19,24 @@ dependencies = [
     "uvicorn[standard]>=0.30",
 ]
 
+
+[project.scripts]
+jokr = "jokr.cli:main"
+
 [dependency-groups]
 dev = [
     "httpx2>=2.13",
+    "hypothesis>=6.100",
     "mypy>=1.11",
+    "pip-audit>=2.7",
     "pre-commit>=3.8",
     "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5",
+    "pytest-xdist>=3.6",
+    "respx>=0.22",
     "ruff>=0.6",
+    "types-defusedxml>=0.7.0.20260504",
     "types-pyyaml>=6.0",
 ]
 
@@ -39,10 +53,35 @@ target-version = "py312"
 extend-exclude = [".claude"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF"]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "TID251"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["jokr"]
+
+
+# C3, structurally: connectors reach the network only through the GuardedClient
+# Scout hands them, and parse XML only with defusedxml. Scoped to jokr/connectors
+# by the per-file-ignores below. tests/test_connector_import_ban.py proves it bites.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"httpx".msg = "connectors use the GuardedClient they are given"
+"urllib".msg = "connectors use the GuardedClient they are given"
+"http.client".msg = "connectors use the GuardedClient they are given"
+"requests".msg = "connectors use the GuardedClient they are given"
+"aiohttp".msg = "connectors use the GuardedClient they are given"
+"socket".msg = "no raw sockets in connectors"
+"ssl".msg = "no raw TLS in connectors"
+"asyncio.open_connection".msg = "no raw sockets in connectors"
+"asyncio.open_unix_connection".msg = "no raw sockets in connectors"
+"subprocess".msg = "no child processes in connectors"
+"asyncio.create_subprocess_exec".msg = "no child processes in connectors"
+"asyncio.create_subprocess_shell".msg = "no child processes in connectors"
+"os.system".msg = "no child processes in connectors"
+"os.popen".msg = "no child processes in connectors"
+"xml".msg = "parse XML with defusedxml only"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106"]
+"!jokr/connectors/**" = ["TID251"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -57,3 +96,5 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

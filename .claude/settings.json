@@ -1,1 +1,62 @@
-{}
+{
+  "permissions": {
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(rm -rf:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "CLAUDE_PLUGIN_ROOT=\"$CLAUDE_PROJECT_DIR/.claude/ecc-hooks\" node \"$CLAUDE_PROJECT_DIR/.claude/ecc-hooks/scripts/hooks/run-with-flags.js\" pre:bash:block-no-verify scripts/hooks/block-no-verify.js minimal,standard,strict"
+          },
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/pre_bash_guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 15,
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/pre_write_gitleaks.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 30,
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/post_edit_ruff.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 120,
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/stop_mypy.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

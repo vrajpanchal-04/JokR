@@ -1,22 +1,81 @@
-# Source allowlist (C3, blueprint §4.2). Anything not listed here may not be read.
-# Everything is off until its connector ships (P1).
+# Source allowlist (C3, blueprint §4.2). This file is the only authority on what
+# Scout may read: a source runs only if it is listed and enabled here, and its
+# connector can only reach `allowed_hosts` (exact match, HTTPS only).
+# Reddit stays off until API keys and Reddit's commercial-use approval exist.
 sources:
   - name: hackernews
     type: api
-    tos_url: https://github.com/HackerNews/API
-    rate_limit_per_min: 60
-    enabled: false
+    enabled: true
+    tos_url: https://hn.algolia.com/api
+    allowed_hosts: [hn.algolia.com]
+    min_interval_s: 1.0
+    # Sized so the first 30-day run can finish: 29 passes, and busy windows split.
+    # Until a run finishes "ok" the watermark doesn't move (P1 plan §11).
+    max_requests: 400
+    max_runtime_s: 900
+    params:
+      kind: hackernews
+      # Commercial-intent phrases (P1 plan §3b): money already being spent,
+      # budgets, and switching away from incumbents.
+      queries:
+        - "internal tool for"
+        - "custom script to"
+        - "we built our own"
+        - "budget for"
+        - "procurement"
+        - "alternative to"
+        - "switching from"
+        - "would pay for"
+        - "is there a tool"
+      tags: [story, ask_hn, comment]
+      # Plus every recent Ask HN and Show HN post, no query needed.
+      browse_tags: [ask_hn, show_hn]
+      hits_per_page: 100
+      lookback_days: 30
+
   - name: reddit
     type: api
+    enabled: false   # needs API keys and Reddit's commercial-use approval
     tos_url: https://redditinc.com/policies/data-api-terms
-    rate_limit_per_min: 60
-    enabled: false
+    allowed_hosts: [www.reddit.com, oauth.reddit.com]
+    min_interval_s: 1.0
+    max_requests: 60
+    params:
+      kind: reddit
+      subreddits:
+        - SaaS
+        - smallbusiness
+        - Entrepreneur
+        - sysadmin
+        - dataengineering
+        - startups
+        - SideProject
+        - Business_Ideas
+        - StartupIdeas
+      listing: new
+      limit: 100
+
   - name: arxiv
     type: api
+    enabled: true
     tos_url: https://info.arxiv.org/help/api/tou.html
-    rate_limit_per_min: 20
-    enabled: false
+    allowed_hosts: [export.arxiv.org]
+    min_interval_s: 3.0   # arXiv terms: at most one request every 3 seconds
+    max_requests: 40      # 40 pages of 500 covers 14 days of these categories
+    max_runtime_s: 600
+    params:
+      kind: arxiv
+      categories: [cs.AI, cs.LG, cs.HC]
+      page_size: 500
+      lookback_days: 14
+
   - name: inbox
     type: inbox
+    enabled: true
     path: data/inbox
-    enabled: false
+    params:
+      kind: inbox
+      max_file_bytes: 5000000
+      max_rows_per_file: 10000
+      max_files: 100
+      max_depth: 2

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <title type="html">ArXiv Query</title>
+  <id>http://arxiv.org/api/fixture</id>
+  <updated>2026-10-05T00:00:00-04:00</updated>
+  <opensearch:totalResults>2</opensearch:totalResults>
+  <opensearch:startIndex>0</opensearch:startIndex>
+  <opensearch:itemsPerPage>100</opensearch:itemsPerPage>
+  <entry>
+    <id>http://arxiv.org/abs/2610.01234v2</id>
+    <updated>2026-10-04T12:00:00Z</updated>
+    <published>2026-10-03T12:00:00Z</published>
+    <title>Reducing   Latency in
+      Production Data Pipelines</title>
+    <summary>  We study pipeline bottlenecks that cost teams revenue.
+    </summary>
+    <author><name>Fixture Author One</name></author>
+    <author><name>Fixture Author Two</name></author>
+    <link href="http://arxiv.org/abs/2610.01234v2" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2610.01234v2" rel="related" type="application/pdf"/>
+    <arxiv:primary_category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.AI" scheme="http://arxiv.org/schemas/atom"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2609.09999v1</id>
+    <updated>2026-09-01T12:00:00Z</updated>
+    <published>2026-09-01T12:00:00Z</published>
+    <title>An Older Paper</title>
+    <summary>Old.</summary>
+    <author><name>Fixture Author Three</name></author>
+    <arxiv:primary_category term="cs.HC" scheme="http://arxiv.org/schemas/atom"/>
+  </entry>
+</feed>

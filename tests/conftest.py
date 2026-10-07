@@ -8,6 +8,7 @@ database is never touched.
 
 import os
 from collections.abc import Iterator
+from contextlib import contextmanager
 from uuid import uuid4
 
 import pytest
@@ -21,8 +22,8 @@ from jokr.db.migrations import alembic_config
 DEFAULT_TEST_URL = "postgresql+psycopg://jokr:jokr@127.0.0.1:5432/postgres"
 
 
-@pytest.fixture(scope="session")
-def database_url() -> Iterator[str]:
+@contextmanager
+def _throwaway_database() -> Iterator[str]:
     server_url = make_url(os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_URL))
     name = f"jokr_test_{uuid4().hex[:8]}"
     admin = create_engine(server_url.set(database="postgres"), isolation_level="AUTOCOMMIT")
@@ -35,6 +36,24 @@ def database_url() -> Iterator[str]:
         with admin.connect() as conn:
             conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
         admin.dispose()
+
+
+@pytest.fixture(scope="session")
+def database_url() -> Iterator[str]:
+    with _throwaway_database() as url:
+        yield url
+
+
+@pytest.fixture(scope="module")
+def committed_db_url() -> Iterator[str]:
+    """A migrated database of its own, for tests that must commit.
+
+    signals is insert-only, so committed rows can't be cleaned up; keeping them
+    out of the shared database keeps the downgrade tests honest.
+    """
+    with _throwaway_database() as url:
+        command.upgrade(alembic_config(url), "head")
+        yield url
 
 
 @pytest.fixture(scope="session")

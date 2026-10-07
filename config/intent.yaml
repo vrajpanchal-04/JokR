@@ -1,0 +1,28 @@
+# Commercial-intent lexicon (P1 §3b). Scout multiplies a signal's score by a
+# group's weight once if any of its terms appear in the title or text, then caps
+# it. Terms are lowercase, whole-word, and match a simple plural.
+#
+# Bump `version` on every edit: each stored signal records the version that
+# scored it, so old and new scores are never mixed up.
+version: "2026-10-05.1"
+cap: 5.0
+groups:
+  - name: money
+    weight: 1.5
+    terms: [payroll, billing, revenue, client, invoice, churn, customer, refund]
+  - name: production_pain
+    weight: 1.3
+    terms: [production, latency, pipeline, outage, bottleneck, downtime, "data loss"]
+  - name: buying
+    weight: 1.5
+    terms:
+      - budget
+      - procurement
+      - "pay for"
+      - "would pay"
+      - "alternative to"
+      - "switching from"
+      - "is there a tool"
+      - "internal tool"
+      - "custom script"
+      - "we built our own"

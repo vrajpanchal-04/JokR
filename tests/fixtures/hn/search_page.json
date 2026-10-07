@@ -1,0 +1,41 @@
+{
+  "hits": [
+    {
+      "objectID": "41000001",
+      "created_at_i": 1790000000,
+      "title": "Ask HN: Is there a tool for reconciling payroll across countries?",
+      "url": null,
+      "author": "fixture_user_a",
+      "points": 42,
+      "num_comments": 17,
+      "story_text": "<p>We built our own internal tool for this &amp; it&#x27;s painful.<p>Budget is there.",
+      "_tags": ["story", "author_fixture_user_a", "story_41000001", "ask_hn"],
+      "_highlightResult": {"title": {"value": "<em>tool</em>"}}
+    },
+    {
+      "objectID": "41000002",
+      "created_at_i": 1790000100,
+      "title": "Show HN: An alternative to spreadsheets for invoices",
+      "url": "https://www.example.com/product/?utm_source=hn",
+      "author": "fixture_user_b",
+      "points": 7,
+      "num_comments": 2,
+      "story_text": null,
+      "_tags": ["story", "show_hn"]
+    },
+    {
+      "objectID": "41000003",
+      "created_at_i": 1790000200,
+      "comment_text": "We would pay for this. Our billing pipeline breaks weekly.",
+      "story_id": 41000001,
+      "story_title": "Ask HN: Is there a tool for reconciling payroll across countries?",
+      "author": "fixture_user_c",
+      "points": null,
+      "_tags": ["comment"]
+    }
+  ],
+  "nbHits": 3,
+  "nbPages": 1,
+  "page": 0,
+  "hitsPerPage": 100
+}

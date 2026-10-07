@@ -1,0 +1,46 @@
+{
+  "kind": "Listing",
+  "data": {
+    "after": "t3_fx0002",
+    "children": [
+      {
+        "kind": "t3",
+        "data": {
+          "id": "fx0001",
+          "name": "t3_fx0001",
+          "subreddit": "SaaS",
+          "title": "We pay $400/mo for a billing tool that keeps breaking",
+          "selftext": "Looking for an alternative to it. Ping u/fixture_other if you know one.",
+          "is_self": true,
+          "url": "https://www.reddit.com/r/SaaS/comments/fx0001/we_pay/",
+          "permalink": "/r/SaaS/comments/fx0001/we_pay/",
+          "author": "fixture_poster",
+          "author_fullname": "t2_fixture",
+          "score": 31,
+          "num_comments": 12,
+          "created_utc": 1790000000.0,
+          "upvote_ratio": 0.93,
+          "preview": {"images": [{"source": {"url": "https://i.redd.it/x.jpg"}}]},
+          "all_awardings": []
+        }
+      },
+      {
+        "kind": "t3",
+        "data": {
+          "id": "fx0002",
+          "name": "t3_fx0002",
+          "subreddit": "SaaS",
+          "title": "Show: my invoicing side project",
+          "selftext": "",
+          "is_self": false,
+          "url": "https://example.com/launch?ref=reddit",
+          "permalink": "/r/SaaS/comments/fx0002/show/",
+          "author": "fixture_maker",
+          "score": -2,
+          "num_comments": 0,
+          "created_utc": 1789990000.0
+        }
+      }
+    ]
+  }
+}
